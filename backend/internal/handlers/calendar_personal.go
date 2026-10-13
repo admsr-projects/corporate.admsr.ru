@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,7 +43,10 @@ func calendarFailDB(w http.ResponseWriter, op string, err error) {
 // ── /api/event_rsvp.php ──────────────────────────────────────────────────────
 
 // EventRSVP: GET — id мероприятий, на которые записан текущий пользователь;
-// POST {eventId, joined} — записаться или отменить запись (идемпотентно).
+// GET ?eventId= — кто записался (только организаторы: правка раздела «Мероприятия», ADR-054);
+// POST {eventId, joined} — записаться или отменить запись (идемпотентно). Лимит мест
+// (events.max_participants, V22) проверяется под блокировкой строки мероприятия: два
+// одновременных «Записаться» на последнее место не пройдут оба.
 type EventRSVP struct {
 	Pool *pgxpool.Pool
 	Auth *auth.Service
@@ -51,6 +55,10 @@ type EventRSVP struct {
 func (h *EventRSVP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		httpx.MethodNotAllowed(w)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Query().Has("eventId") {
+		h.participants(w, r)
 		return
 	}
 	cur, ok := requireUser(w, r, h.Auth)
@@ -73,19 +81,7 @@ func (h *EventRSVP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	joined, _ := body["joined"].(bool)
 	if joined {
-		var exists int64
-		if err := h.Pool.QueryRow(r.Context(), `SELECT id FROM public.events WHERE id = $1`, eventID).Scan(&exists); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				httpx.Fail(w, http.StatusNotFound, "Мероприятие не найдено")
-				return
-			}
-			calendarFailDB(w, "rsvp event", err)
-			return
-		}
-		if _, err := h.Pool.Exec(r.Context(), `
-			INSERT INTO public.event_rsvps (event_id, user_id) VALUES ($1, $2)
-			ON CONFLICT (event_id, user_id) DO NOTHING`, eventID, cur.ID); err != nil {
-			calendarFailDB(w, "rsvp add", err)
+		if !h.join(w, r, eventID, cur.ID) {
 			return
 		}
 	} else if _, err := h.Pool.Exec(r.Context(),
@@ -93,7 +89,105 @@ func (h *EventRSVP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		calendarFailDB(w, "rsvp remove", err)
 		return
 	}
-	httpx.OK(w, map[string]any{"eventId": eventID, "joined": joined}, "")
+	var count int64
+	if err := h.Pool.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM public.event_rsvps WHERE event_id = $1`, eventID).Scan(&count); err != nil {
+		calendarFailDB(w, "rsvp count", err)
+		return
+	}
+	httpx.OK(w, map[string]any{"eventId": eventID, "joined": joined, "participantsCount": count}, "")
+}
+
+// join — записать с проверкой лимита в транзакции; false — ответ уже записан.
+func (h *EventRSVP) join(w http.ResponseWriter, r *http.Request, eventID, userID int64) bool {
+	ctx := r.Context()
+	tx, err := h.Pool.Begin(ctx)
+	if err != nil {
+		calendarFailDB(w, "rsvp begin", err)
+		return false
+	}
+	defer tx.Rollback(ctx)
+
+	var limit *int32
+	if err := tx.QueryRow(ctx,
+		`SELECT max_participants FROM public.events WHERE id = $1 FOR UPDATE`, eventID).Scan(&limit); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			httpx.Fail(w, http.StatusNotFound, "Мероприятие не найдено")
+			return false
+		}
+		if isUndefinedColumn(err) {
+			httpx.Fail(w, http.StatusServiceUnavailable, "Мероприятия не обновлены на сервере: нужна миграция V22__events_schedule_limit.sql")
+			return false
+		}
+		calendarFailDB(w, "rsvp event", err)
+		return false
+	}
+	if limit != nil {
+		var already bool
+		var count int64
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM public.event_rsvps WHERE event_id = $1 AND user_id = $2),
+			       (SELECT COUNT(*) FROM public.event_rsvps WHERE event_id = $1)`, eventID, userID).Scan(&already, &count); err != nil {
+			calendarFailDB(w, "rsvp count", err)
+			return false
+		}
+		if !already && count >= int64(*limit) {
+			httpx.Fail(w, http.StatusConflict, "Мест больше нет: записалось "+strconv.FormatInt(count, 10)+" из "+strconv.Itoa(int(*limit)))
+			return false
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO public.event_rsvps (event_id, user_id) VALUES ($1, $2)
+		ON CONFLICT (event_id, user_id) DO NOTHING`, eventID, userID); err != nil {
+		calendarFailDB(w, "rsvp add", err)
+		return false
+	}
+	if err := tx.Commit(ctx); err != nil {
+		calendarFailDB(w, "rsvp commit", err)
+		return false
+	}
+	return true
+}
+
+// participants — кто записался на мероприятие, в порядке записи. Только организаторам.
+func (h *EventRSVP) participants(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireSection(w, r, h.Pool, h.Auth, "events"); !ok {
+		return
+	}
+	eventID, _ := strconv.ParseInt(r.URL.Query().Get("eventId"), 10, 64)
+	if eventID <= 0 {
+		httpx.Fail(w, http.StatusBadRequest, "Не передан eventId")
+		return
+	}
+	rows, err := h.Pool.Query(r.Context(), `
+		SELECT r.user_id,
+		       COALESCE(NULLIF(TRIM(CONCAT_WS(' ', u.surname, u.firstname, u.lastname)), ''), 'Сотрудник'),
+		       COALESCE(u.avatar_url, ''), r.created_at
+		FROM public.event_rsvps r
+		LEFT JOIN public.user_info u ON u.id = r.user_id
+		WHERE r.event_id = $1
+		ORDER BY r.created_at, r.user_id`, eventID)
+	if err != nil {
+		calendarFailDB(w, "rsvp participants", err)
+		return
+	}
+	defer rows.Close()
+	list := []map[string]any{}
+	for rows.Next() {
+		var uid int64
+		var name, avatar string
+		var at time.Time
+		if err := rows.Scan(&uid, &name, &avatar, &at); err != nil {
+			calendarFailDB(w, "rsvp participants scan", err)
+			return
+		}
+		list = append(list, map[string]any{"id": uid, "name": name, "avatar_url": avatar, "joinedAt": at})
+	}
+	if err := rows.Err(); err != nil {
+		calendarFailDB(w, "rsvp participants rows", err)
+		return
+	}
+	httpx.OK(w, list, "OK")
 }
 
 func (h *EventRSVP) list(w http.ResponseWriter, r *http.Request, cur *auth.User) {

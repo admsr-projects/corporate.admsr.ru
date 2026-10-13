@@ -7,7 +7,7 @@
 | Сборка фронтенда | `npm run build` | ✅ |
 | Компиляция Go | `cd backend && go build ./...` | ✅ |
 | Статический анализ Go | `cd backend && go vet ./...` | ✅ |
-| Тесты Go | `cd backend && go test ./...` | ✅ 37 тест-функций в `internal/handlers`, `internal/courses`, `internal/tests`, `internal/media` и `internal/profanity` |
+| Тесты Go | `cd backend && go test ./...` | ✅ 41 тест-функция в `internal/handlers`, `internal/courses`, `internal/tests`, `internal/media` и `internal/profanity` |
 | Smoke схемы курсов | `npm run test:courses` | требует PHP + доступ к БД |
 | Проверка типов TS | `npm run typecheck` | ⚠️ vue-tsc с базовой линией: падает, только если ошибок стало больше, чем в `scripts/typecheck-baseline.json` (сейчас 113; ADR-045) |
 | Линт | — | ❌ не настроен |

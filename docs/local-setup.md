@@ -148,7 +148,7 @@ curl -s http://127.0.0.1:8080/api/health.php
 | CI (`.github/workflows`, `.gitlab-ci.yml`) | Проверки запускаются только вручную |
 
 Единственный автоматический набор проверок — Go-тесты (`backend/internal/`,
-37 тест-функций в `internal/handlers`, `internal/courses`, `internal/tests`, `internal/media` и `internal/profanity`). См. [quality-and-deploy.md](quality-and-deploy.md).
+41 тест-функция в `internal/handlers`, `internal/courses`, `internal/tests`, `internal/media` и `internal/profanity`). См. [quality-and-deploy.md](quality-and-deploy.md).
 
 ## Локальная БД в Docker
 

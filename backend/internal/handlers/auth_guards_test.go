@@ -74,6 +74,7 @@ func TestEndpointsRequireSessionBeforeTouchingDB(t *testing.T) {
 		{"image upload", http.MethodPost, "/api/Upload/upload.php", `{}`, nil, uploadH.ServeHTTP},
 		{"rsvp list", http.MethodGet, "/api/event_rsvp.php", "", nil, rsvpH.ServeHTTP},
 		{"rsvp set", http.MethodPost, "/api/event_rsvp.php", `{"eventId":1,"joined":true}`, nil, rsvpH.ServeHTTP},
+		{"rsvp participants", http.MethodGet, "/api/event_rsvp.php?eventId=1", "", nil, rsvpH.ServeHTTP},
 		{"calendar list", http.MethodGet, "/api/calendar_entries.php", "", nil, calendarH.ServeHTTP},
 		{"calendar create", http.MethodPost, "/api/calendar_entries.php", `{"action":"create","source":"personal","dateKey":"2026-10-02","title":"x"}`, nil, calendarH.ServeHTTP},
 		{"calendar delete", http.MethodPost, "/api/calendar_entries.php", `{"action":"delete","id":1}`, nil, calendarH.ServeHTTP},

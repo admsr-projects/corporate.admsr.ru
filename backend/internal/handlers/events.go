@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,6 +37,110 @@ type eventRow struct {
 	AlbumName   *string
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
+	eventSchedule
+	// Participants — сколько записалось (event_rsvps).
+	Participants int64
+}
+
+// eventSchedule — время, место и лимит мест (V22, ADR-054). nil — не указано.
+type eventSchedule struct {
+	TimeStart       *string // 'HH:MM'
+	TimeEnd         *string // 'HH:MM'
+	Location        *string
+	MaxParticipants *int32 // nil — без ограничения
+}
+
+const (
+	eventLocationMax     = 300
+	eventParticipantsMax = 100000
+)
+
+// eventCols — колонки для eventRow.dest(); таблица — под псевдонимом e.
+const eventCols = `e.id, e.title, e.description, e.badge, e.date, e.image, e.image_full, e.album_id,
+	e.created_at, e.updated_at, e.time_start, e.time_end, e.location, e.max_participants,
+	(SELECT COUNT(*) FROM public.event_rsvps r WHERE r.event_id = e.id)`
+
+func (row *eventRow) dest() []any {
+	return []any{
+		&row.ID, &row.Title, &row.Description, &row.Badge, &row.Date, &row.Image, &row.ImageFull, &row.AlbumID,
+		&row.CreatedAt, &row.UpdatedAt, &row.TimeStart, &row.TimeEnd, &row.Location, &row.MaxParticipants,
+		&row.Participants,
+	}
+}
+
+// eventsFailDB — без V22 (нет колонок времени, места, лимита) — понятный 503 вместо «ошибки БД».
+func eventsFailDB(w http.ResponseWriter, err error, fallback string) {
+	if isUndefinedColumn(err) {
+		httpx.Fail(w, http.StatusServiceUnavailable, "Мероприятия не обновлены на сервере: нужна миграция V22__events_schedule_limit.sql")
+		return
+	}
+	httpx.Fail(w, http.StatusInternalServerError, fallback)
+}
+
+var eventTimeRe = regexp.MustCompile(`^([01]?\d|2[0-3]):([0-5]\d)$`)
+
+// normalizeEventTime — «9:00» → «09:00»; пусто — nil; false — не время.
+func normalizeEventTime(v any) (*string, bool) {
+	s := strings.TrimSpace(strVal(v))
+	if s == "" {
+		return nil, true
+	}
+	m := eventTimeRe.FindStringSubmatch(s)
+	if m == nil {
+		return nil, false
+	}
+	h, _ := strconv.Atoi(m[1])
+	t := fmt.Sprintf("%02d:%s", h, m[2])
+	return &t, true
+}
+
+// parseEventSchedule — время, место, лимит из тела запроса. Ключа нет — остаётся
+// значение из cur (при правке — текущее). Вторым значением — текст ошибки для 422.
+func parseEventSchedule(d map[string]any, cur eventSchedule) (eventSchedule, string) {
+	out := cur
+	if v, ok := d["time_start"]; ok {
+		t, valid := normalizeEventTime(v)
+		if !valid {
+			return out, "Время начала — в формате ЧЧ:ММ"
+		}
+		out.TimeStart = t
+	}
+	if v, ok := d["time_end"]; ok {
+		t, valid := normalizeEventTime(v)
+		if !valid {
+			return out, "Время окончания — в формате ЧЧ:ММ"
+		}
+		out.TimeEnd = t
+	}
+	if out.TimeEnd != nil && out.TimeStart == nil {
+		return out, "Укажите время начала"
+	}
+	if out.TimeEnd != nil && *out.TimeEnd < *out.TimeStart {
+		return out, "Окончание раньше начала"
+	}
+	if v, ok := d["location"]; ok {
+		loc := strings.TrimSpace(strVal(v))
+		if utf8.RuneCountInString(loc) > eventLocationMax {
+			return out, "Место — не длиннее " + strconv.Itoa(eventLocationMax) + " символов"
+		}
+		out.Location = nil
+		if loc != "" {
+			out.Location = &loc
+		}
+	}
+	if v, ok := d["max_participants"]; ok {
+		raw := strings.TrimSpace(strVal(v))
+		out.MaxParticipants = nil
+		if raw != "" && raw != "0" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 || n > eventParticipantsMax {
+				return out, "Лимит мест — целое число от 1 (пусто — без ограничения)"
+			}
+			n32 := int32(n)
+			out.MaxParticipants = &n32
+		}
+	}
+	return out, ""
 }
 
 func (h *Events) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +172,7 @@ func (h *Events) get(w http.ResponseWriter, r *http.Request) {
 				httpx.Fail(w, http.StatusNotFound, "Мероприятие не найдено")
 				return
 			}
-			httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+			eventsFailDB(w, err, "Ошибка подключения к БД")
 			return
 		}
 		httpx.OK(w, fmtEvent(row), "OK")
@@ -80,7 +186,7 @@ func (h *Events) get(w http.ResponseWriter, r *http.Request) {
 				httpx.Fail(w, http.StatusBadRequest, "Некорректный cursor")
 				return
 			}
-			httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+			eventsFailDB(w, err, "Ошибка подключения к БД")
 			return
 		}
 		httpx.OK(w, page, "OK")
@@ -89,7 +195,7 @@ func (h *Events) get(w http.ResponseWriter, r *http.Request) {
 
 	items, err := h.fetchList(r.Context(), q)
 	if err != nil {
-		httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+		eventsFailDB(w, err, "Ошибка подключения к БД")
 		return
 	}
 	httpx.OK(w, items, "OK")
@@ -111,6 +217,12 @@ func (h *Events) post(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(strVal(d["date"])) == "" {
 		httpx.Fail(w, http.StatusUnprocessableEntity, "Поле «date» обязательно")
+		return
+	}
+
+	sched, msg := parseEventSchedule(d, eventSchedule{})
+	if msg != "" {
+		httpx.Fail(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
 
@@ -142,8 +254,9 @@ func (h *Events) post(w http.ResponseWriter, r *http.Request) {
 
 	var newID int64
 	err = h.Pool.QueryRow(r.Context(), `
-		INSERT INTO public.events (title, description, badge, date, image, image_full, album_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+		INSERT INTO public.events (title, description, badge, date, image, image_full, album_id,
+			time_start, time_end, location, max_participants)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
 		strings.TrimSpace(strVal(d["title"])),
 		desc,
 		badge,
@@ -151,8 +264,13 @@ func (h *Events) post(w http.ResponseWriter, r *http.Request) {
 		image,
 		imageFull,
 		albumID,
+		sched.TimeStart, sched.TimeEnd, sched.Location, sched.MaxParticipants,
 	).Scan(&newID)
 	if err != nil {
+		if isUndefinedColumn(err) {
+			eventsFailDB(w, err, "")
+			return
+		}
 		if strings.Contains(strings.ToLower(err.Error()), "album_id") {
 			httpx.Fail(w, http.StatusInternalServerError, "В БД нет колонки events.album_id. Примените миграцию db/migration/V7__events_gallery_album.sql")
 			return
@@ -195,11 +313,23 @@ func (h *Events) put(w http.ResponseWriter, r *http.Request) {
 
 	var curImage, curImageFull string
 	var curAlbumID *int64
+	var cur eventSchedule
 	err := h.Pool.QueryRow(r.Context(), `
-		SELECT image, image_full, album_id FROM public.events WHERE id = $1`, id).
-		Scan(&curImage, &curImageFull, &curAlbumID)
+		SELECT image, image_full, album_id, time_start, time_end, location, max_participants
+		FROM public.events WHERE id = $1`, id).
+		Scan(&curImage, &curImageFull, &curAlbumID, &cur.TimeStart, &cur.TimeEnd, &cur.Location, &cur.MaxParticipants)
 	if err != nil {
-		httpx.Fail(w, http.StatusNotFound, "Мероприятие не найдено")
+		if errors.Is(err, pgx.ErrNoRows) {
+			httpx.Fail(w, http.StatusNotFound, "Мероприятие не найдено")
+			return
+		}
+		eventsFailDB(w, err, "Ошибка подключения к БД")
+		return
+	}
+	// Лимит можно опустить ниже числа записавшихся: уже записанные остаются, новых не пускаем.
+	sched, msg := parseEventSchedule(d, cur)
+	if msg != "" {
+		httpx.Fail(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
 
@@ -235,8 +365,9 @@ func (h *Events) put(w http.ResponseWriter, r *http.Request) {
 	_, err = h.Pool.Exec(r.Context(), `
 		UPDATE public.events
 		SET title = $1, description = $2, badge = $3, date = $4,
-		    image = $5, image_full = $6, album_id = $7, updated_at = NOW()
-		WHERE id = $8`,
+		    image = $5, image_full = $6, album_id = $7,
+		    time_start = $8, time_end = $9, location = $10, max_participants = $11, updated_at = NOW()
+		WHERE id = $12`,
 		strings.TrimSpace(strVal(d["title"])),
 		desc,
 		badge,
@@ -244,6 +375,7 @@ func (h *Events) put(w http.ResponseWriter, r *http.Request) {
 		image,
 		imageFull,
 		albumID,
+		sched.TimeStart, sched.TimeEnd, sched.Location, sched.MaxParticipants,
 		id,
 	)
 	if err != nil {
@@ -284,12 +416,7 @@ func (h *Events) del(w http.ResponseWriter, r *http.Request) {
 
 func (h *Events) fetchOne(ctx context.Context, id int64) (eventRow, error) {
 	var row eventRow
-	err := h.Pool.QueryRow(ctx, `
-		SELECT id, title, description, badge, date, image, image_full, album_id, created_at, updated_at
-		FROM public.events WHERE id = $1`, id).Scan(
-		&row.ID, &row.Title, &row.Description, &row.Badge, &row.Date,
-		&row.Image, &row.ImageFull, &row.AlbumID, &row.CreatedAt, &row.UpdatedAt,
-	)
+	err := h.Pool.QueryRow(ctx, `SELECT `+eventCols+` FROM public.events e WHERE e.id = $1`, id).Scan(row.dest()...)
 	if err != nil {
 		return row, err
 	}
@@ -315,8 +442,7 @@ func (h *Events) fetchList(ctx context.Context, q interface{ Get(string) string 
 		dir = "DESC"
 	}
 
-	cols := "id, title, description, badge, date, image, image_full, album_id, created_at, updated_at"
-	sql := "SELECT " + cols + " FROM public.events"
+	sql := "SELECT " + eventCols + " FROM public.events e"
 	if len(cond) > 0 {
 		sql += " WHERE " + strings.Join(cond, " AND ")
 	}
@@ -357,8 +483,7 @@ func (h *Events) fetchCursorPage(ctx context.Context, q interface{ Get(string) s
 	}
 
 	fetchLimit := limit + 1
-	cols := "id, title, description, badge, date, image, image_full, album_id, created_at, updated_at"
-	sql := "SELECT " + cols + " FROM public.events"
+	sql := "SELECT " + eventCols + " FROM public.events e"
 	if len(cond) > 0 {
 		sql += " WHERE " + strings.Join(cond, " AND ")
 	}
@@ -478,10 +603,7 @@ func scanEventRows(rows eventScanner) ([]map[string]any, error) {
 	var out []map[string]any
 	for rows.Next() {
 		var row eventRow
-		if err := rows.Scan(
-			&row.ID, &row.Title, &row.Description, &row.Badge, &row.Date,
-			&row.Image, &row.ImageFull, &row.AlbumID, &row.CreatedAt, &row.UpdatedAt,
-		); err != nil {
+		if err := rows.Scan(row.dest()...); err != nil {
 			return nil, err
 		}
 		out = append(out, fmtEvent(row))
@@ -520,5 +642,18 @@ func fmtEvent(r eventRow) map[string]any {
 		"album_name":  r.AlbumName,
 		"created_at":  formatTime(r.CreatedAt),
 		"updated_at":  formatTime(r.UpdatedAt),
+		// V22: пустая строка / null — не указано (фронт пишет «уточняется», «без ограничения»).
+		"time_start":         derefStr(r.TimeStart),
+		"time_end":           derefStr(r.TimeEnd),
+		"location":           derefStr(r.Location),
+		"max_participants":   r.MaxParticipants,
+		"participants_count": r.Participants,
 	}
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

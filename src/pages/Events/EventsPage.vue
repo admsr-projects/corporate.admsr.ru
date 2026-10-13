@@ -11,12 +11,22 @@ import { useCursorFeed } from '../../composables/useCursorFeed';
 import { useFeedSentinel } from '../../composables/useFeedSentinel';
 import { useAppToast } from '../../composables/useAppToast';
 import { useEventRsvp } from '../../composables/useEventRsvp';
+import {
+  eventScheduleBody,
+  eventSeatsLabel,
+  eventTimeLabel,
+  isEventFull,
+  readEventSchedule,
+  type EventSchedule,
+} from '../../composables/eventSchedule';
+import EventScheduleFields from './components/EventScheduleFields.vue';
 
 type EventPost = BlogPostProps & {
   id?: number;
   badge?: string;
   rawDate?: string;
   description?: string;
+  schedule: EventSchedule;
 };
 
 type EventCardModel = EventPost & {
@@ -27,6 +37,9 @@ type EventCardModel = EventPost & {
   isPast: boolean;
   isArchived: boolean;
   isJoined: boolean;
+  /** Лимит мест заполнен (V22) */
+  isFull: boolean;
+  seatsLabel: string;
 };
 
 const EVENTS_PAGE_LIMIT = 24;
@@ -130,6 +143,7 @@ function mapEvent(raw: any): EventPost {
     date: formatDateRuLong(rawDate) || rawDate,
     to: `/events/${raw.id}`,
     image: raw.image ? { src: raw.image, alt: raw.title } : undefined,
+    schedule: readEventSchedule(raw),
   };
 }
 
@@ -140,6 +154,7 @@ async function toggleJoin(event: EventPost, e?: Event) {
   if (!id) return;
   if (isArchivedBadge(event.badge)) return;
   const wasJoined = isJoined(id);
+  if (!wasJoined && isEventFull(event.schedule)) return;
   const res = await setJoined(id, !wasJoined);
   if (!res.ok) {
     toast.add({
@@ -149,6 +164,11 @@ async function toggleJoin(event: EventPost, e?: Event) {
       icon: 'i-lucide-alert-circle',
     });
     return;
+  }
+  // Число записавшихся — с сервера: карточки показывают «Записалось N из M».
+  const post = posts.value.find((p) => p.id === id);
+  if (post && res.participantsCount != null) {
+    post.schedule = { ...post.schedule, participantsCount: res.participantsCount };
   }
   toast.add({
     title: wasJoined ? 'Запись отменена' : 'Вы записались на мероприятие',
@@ -166,11 +186,14 @@ function toCardModel(event: EventPost): EventCardModel {
     ...event,
     day: d ? String(d.getDate()).padStart(2, '0') : '—',
     monthShort: d ? MONTH_SHORT[d.getMonth()]! : '—',
-    timeLabel: extractTimeLabel(text),
-    placeLabel: extractPlaceLabel(text),
+    // Поля V22; у старых мероприятий без них — как раньше, из текста описания.
+    timeLabel: eventTimeLabel(event.schedule) || extractTimeLabel(text),
+    placeLabel: event.schedule.location || extractPlaceLabel(text),
     isPast: past,
     isArchived: archived,
     isJoined: isJoined(event.id),
+    isFull: isEventFull(event.schedule),
+    seatsLabel: eventSeatsLabel(event.schedule),
   };
 }
 
@@ -312,6 +335,10 @@ type CreateFormState = {
   badge: string | null;
   date: string;
   albumId: string;
+  timeStart: string;
+  timeEnd: string;
+  location: string;
+  maxParticipants: number | null;
 };
 
 const createState = reactive<CreateFormState>({
@@ -320,6 +347,10 @@ const createState = reactive<CreateFormState>({
   badge: null,
   date: '',
   albumId: 'none',
+  timeStart: '',
+  timeEnd: '',
+  location: '',
+  maxParticipants: null,
 });
 
 const createImageFile = ref<File | null>(null);
@@ -348,6 +379,10 @@ function resetCreateForm() {
   createState.badge = null;
   createState.date = '';
   createState.albumId = 'none';
+  createState.timeStart = '';
+  createState.timeEnd = '';
+  createState.location = '';
+  createState.maxParticipants = null;
   createImageFile.value = null;
   if (createImagePreview.value) URL.revokeObjectURL(createImagePreview.value);
   createImagePreview.value = '';
@@ -368,6 +403,10 @@ function validateCreate(): boolean {
   }
   if (!createState.date) {
     createError.value = 'Выберите дату проведения.';
+    return false;
+  }
+  if (createState.timeStart && createState.timeEnd && createState.timeEnd < createState.timeStart) {
+    createError.value = 'Время окончания раньше начала.';
     return false;
   }
   createError.value = null;
@@ -403,6 +442,7 @@ async function handleCreateSubmit() {
         image: imagePath,
         image_full: imageFullPath,
         album_id: createState.albumId && createState.albumId !== 'none' ? Number(createState.albumId) : null,
+        ...eventScheduleBody(createState),
       },
     });
     if (!json.success) throw new Error(json.message || 'Ошибка создания');
@@ -573,17 +613,24 @@ onUnmounted(() => {
                       <UIcon name="i-lucide-map-pin" class="size-3.5 shrink-0" />
                       <span class="truncate">{{ event.placeLabel }}</span>
                     </p>
+                    <p
+                      class="inline-flex items-center gap-1.5 text-sm min-w-0"
+                      :class="event.isFull ? 'text-warning' : 'text-muted'"
+                    >
+                      <UIcon name="i-lucide-users" class="size-3.5 shrink-0" aria-hidden="true" />
+                      <span class="truncate">{{ event.seatsLabel }}</span>
+                    </p>
                   </RouterLink>
                   <div v-if="!isKiosk" class="mt-auto flex flex-wrap gap-2">
                     <UButton
                       color="primary"
                       variant="outline"
                       size="md"
-                      :icon="event.isJoined ? 'i-lucide-check' : 'i-lucide-calendar-plus'"
-                      :disabled="event.isArchived"
+                      :icon="event.isJoined ? 'i-lucide-check' : event.isFull ? 'i-lucide-lock' : 'i-lucide-calendar-plus'"
+                      :disabled="event.isArchived || (event.isFull && !event.isJoined)"
                       @click="toggleJoin(event, $event)"
                     >
-                      {{ event.isJoined ? 'Вы записаны' : 'Записаться' }}
+                      {{ event.isJoined ? 'Вы записаны' : event.isFull ? 'Мест нет' : 'Записаться' }}
                     </UButton>
                     <UButton
                       color="neutral"
@@ -781,6 +828,14 @@ onUnmounted(() => {
               </template>
             </UInputDate>
           </UFormField>
+
+          <EventScheduleFields
+            v-model:time-start="createState.timeStart"
+            v-model:time-end="createState.timeEnd"
+            v-model:location="createState.location"
+            v-model:max-participants="createState.maxParticipants"
+            size="xl"
+          />
 
           <UFormField label="Альбом фотогалереи" name="albumId">
             <USelect

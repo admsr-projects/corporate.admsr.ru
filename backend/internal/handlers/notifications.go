@@ -56,7 +56,7 @@ func notificationsFailDB(w http.ResponseWriter, op string, err error) {
 		return
 	}
 	if isUndefinedColumn(err) {
-		httpx.Fail(w, http.StatusServiceUnavailable, "Уведомления не обновлены на сервере: нужны миграции V18–V20 (V18__news_comments.sql, V19__calendar_colors_reminders.sql, V20__devblog.sql)")
+		httpx.Fail(w, http.StatusServiceUnavailable, "Уведомления не обновлены на сервере: нужны миграции V18–V22 (V18__news_comments.sql, V19__calendar_colors_reminders.sql, V20__devblog.sql, V22__events_schedule_limit.sql)")
 		return
 	}
 	httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
@@ -103,7 +103,7 @@ const sqlNotificationsList = `
 			COALESCE(u.avatar_url, ''),
 			COALESCE(p.content, nc.content, ce.title, ev.title, nw.title, ''),
 			n.calendar_entry_id, n.event_id, to_char(n.event_date, 'YYYY-MM-DD'),
-			COALESCE(ce.time_start, ''), COALESCE(ce.location, ''), COALESCE(ce.color, '')
+			COALESCE(ce.time_start, ev.time_start, ''), COALESCE(ce.location, ev.location, ''), COALESCE(ce.color, '')
 		FROM public.notifications n
 		LEFT JOIN public.user_info u ON u.id = n.actor_id
 		LEFT JOIN public.wall_posts p ON p.id = n.post_id

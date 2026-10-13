@@ -69,7 +69,7 @@ cd backend
 make run             # Go API (go run ./cmd/api)
 go build ./...       # компиляция
 go vet ./...         # статический анализ
-go test ./...        # тесты (37 тест-функций)
+go test ./...        # тесты (41 тест-функция)
 ```
 
 Проверка живости API:

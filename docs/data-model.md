@@ -16,7 +16,7 @@
 |---------|----------------|
 | `user_info` | вся авторизация, профиль, админка (31 запрос в Go) |
 | `news` | `handlers/news.go` |
-| `events` | `handlers/events.go` (колонку `album_id` добавляет V7) |
+| `events` | `handlers/events.go` (колонку `album_id` добавляет V7; `time_start`, `time_end`, `location`, `max_participants` — V22) |
 | `gallery`, `gallery_base` | `handlers/gallery.go` |
 | `ofo_unit`, `ofo_unit_position`, `ofo_position`, `ofo_category`, `ofo_seats`, `ofo` | `handlers/ofo.go` |
 | `absence_journal` | `handlers/absence.go` |
@@ -59,6 +59,7 @@
 | `V12__course_assign_all.sql` | `course_assignments`: `target_type = 'all'`, колонка `deadline_days`, индекс действующих назначений |
 | `V21__devblog_version.sql` | `release_version text` в `devblog_draft` и `devblog_posts` — версия выпуска девблога «X.Y.Z» |
 | `V20__devblog.sql` | `devblog_draft` (одна строка `id = 1`: `title`, `body_md`, `image_path`, `version`, `updated_by`, `updated_at`) — общий черновик; `devblog_posts (news_id, body_md, published_by, published_at)`; `devblog_dismissed (news_id, user_id)` — кто закрыл окошко; `notifications.news_id` (вид `devblog`). `news_id` — soft ref; при удалении новости `news.go` чистит девблог и уведомления |
+| `V22__events_schedule_limit.sql` | `events.time_start`, `time_end` (`'HH:MM'`), `location`, `max_participants` (NULL — без ограничения; CHECK > 0); индекс `event_rsvps (event_id, created_at)` для списка записавшихся |
 | `V19__calendar_colors_reminders.sql` | `calendar_entries.color` (`#rrggbb` или NULL); `notifications.actor_id` — NULL допустим (системные); `notifications.calendar_entry_id → calendar_entries ON DELETE CASCADE`, `event_id → events ON DELETE CASCADE`, `event_date`; уникальный частичный индекс напоминаний `(user_id, COALESCE(calendar_entry_id,0), COALESCE(event_id,0), event_date) WHERE kind = 'event_reminder'` |
 | `V18__news_comments.sql` | `news_comments (news_id, root_id → news_comments, reply_to_id → news_comments, reply_to_user_id, author_id, content, deleted_at)` — комментарии к новостям, два уровня (`root_id IS NULL` — комментарий, иначе ответ в ветке); `news_comment_reactions (comment_id → news_comments ON DELETE CASCADE, user_id, reaction)`; `notifications.comment_id → news_comments ON DELETE CASCADE` (вид `comment_reply`). `news_id` — soft ref; при удалении новости комментарии удаляет `news.go` |
 | `V17__birthday_greetings_notifications.sql` | `wall_posts.birthday_year` — запись является поздравлением с днём рождения этого года (год дня рождения), уникальный индекс `(owner_id, author_id, birthday_year)` — одно поздравление от автора в год; `notifications (user_id, actor_id, kind, post_id → wall_posts ON DELETE CASCADE, read_at)` — колокольчик, `kind`: `wall_post` / `birthday_greeting` |

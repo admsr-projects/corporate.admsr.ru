@@ -63,19 +63,21 @@ export function useEventRsvp() {
   async function setJoined(
     eventId: number,
     joined: boolean,
-  ): Promise<{ ok: boolean; message?: string }> {
+  ): Promise<{ ok: boolean; message?: string; participantsCount?: number }> {
     const id = Number(eventId);
     const next = new Set(joinedIds.value);
     if (joined) next.add(id);
     else next.delete(id);
     joinedIds.value = next;
     try {
-      const json = await apiSessionFetch('/api/event_rsvp.php', {
+      const json = await apiSessionFetch<{ participantsCount?: number }>('/api/event_rsvp.php', {
         method: 'POST',
         json: { eventId: id, joined },
       });
+      // 409 — мест больше нет (лимит, V22): сообщение сервера уходит в тост.
       if (!json?.success) throw new Error(json?.message || 'Не удалось сохранить запись');
-      return { ok: true };
+      const count = Number(json.data?.participantsCount);
+      return { ok: true, participantsCount: Number.isFinite(count) ? count : undefined };
     } catch (e) {
       const back = new Set(joinedIds.value);
       if (joined) back.delete(id);

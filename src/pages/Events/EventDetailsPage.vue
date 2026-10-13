@@ -9,6 +9,16 @@ import { useEventRsvp } from '../../composables/useEventRsvp';
 import { useGalleryData } from '../../composables/useGalleryData';
 import { slideoverPopoverContent, slideoverSelectContent } from '../../composables/slideoverFieldUi';
 import { toCalendarDate } from '../../utils/date';
+import { userAvatarSrc } from '../../utils/userName';
+import {
+  eventScheduleBody,
+  eventSeatsLabel,
+  eventTimeLabel,
+  isEventFull,
+  readEventSchedule,
+  type EventSchedule,
+} from '../../composables/eventSchedule';
+import EventScheduleFields from './components/EventScheduleFields.vue';
 
 type EventPost = BlogPostProps & {
   id?: number;
@@ -17,7 +27,10 @@ type EventPost = BlogPostProps & {
   link?: string;
   album_id?: number | null;
   album_name?: string | null;
+  schedule: EventSchedule;
 };
+
+type EventParticipant = { id: number; name: string; avatar_url: string; joinedAt: string };
 
 type AlbumPhoto = {
   id: string;
@@ -108,6 +121,7 @@ function mapEvent(raw: any): EventPost {
     link:        raw.link ?? undefined,
     album_id:    raw.album_id != null ? Number(raw.album_id) : null,
     album_name:  raw.album_name ?? null,
+    schedule:    readEventSchedule(raw),
   };
 }
 
@@ -166,6 +180,7 @@ async function fetchEvent(id: string | string[]) {
     if (!json.success) throw new Error(json.message || 'Ошибка загрузки');
 
     event.value = mapEvent(json.data);
+    void loadParticipants();
     await loadAlbumPhotos(event.value.album_id);
   } catch (e: any) {
     fetchError.value = e.message ?? 'Не удалось загрузить мероприятие';
@@ -197,12 +212,51 @@ watch(
 // ─── Запись на мероприятие (сервер, V16) ──────────────────────────────────────
 const { ensureLoaded: ensureRsvpLoaded, isJoined: isJoinedEvent, setJoined } = useEventRsvp();
 const isJoined = computed(() => isJoinedEvent(event.value?.id));
+/** Лимит мест заполнен (V22) — записаться нельзя, отменить свою запись можно. */
+const isFull = computed(() => !!event.value && isEventFull(event.value.schedule));
+const timeLabel = computed(() => (event.value ? eventTimeLabel(event.value.schedule) : ''));
+const seatsLabel = computed(() => (event.value ? eventSeatsLabel(event.value.schedule) : ''));
+
+// ─── Записавшиеся — только организаторам (правка раздела «Мероприятия», ADR-054) ───
+const participants = ref<EventParticipant[]>([]);
+const participantsLoading = ref(false);
+const participantsError = ref<string | null>(null);
+const showParticipants = computed(() => isAdmin.value && !isKiosk.value);
+
+async function loadParticipants() {
+  const id = event.value?.id;
+  if (!id || !showParticipants.value) return;
+  participantsLoading.value = true;
+  participantsError.value = null;
+  try {
+    const json = await apiSessionFetch<EventParticipant[]>(`/api/event_rsvp.php?eventId=${id}`);
+    if (!json?.success) throw new Error(json?.message || 'Не удалось загрузить список');
+    if (event.value?.id !== id) return;
+    participants.value = Array.isArray(json.data) ? json.data : [];
+  } catch (e) {
+    participantsError.value = e instanceof Error ? e.message : 'Не удалось загрузить список';
+  } finally {
+    participantsLoading.value = false;
+  }
+}
+
+// Права раздела приходят после страницы — тогда и грузим список.
+watch(showParticipants, (v) => {
+  if (v) void loadParticipants();
+});
+
+function formatJoinedAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).format(d);
+}
 
 async function toggleJoin() {
   const id = event.value?.id;
   if (!id) return;
   if (isArchivedEvent.value) return;
   const wasJoined = isJoined.value;
+  if (!wasJoined && isFull.value) return;
   const res = await setJoined(id, !wasJoined);
   if (!res.ok) {
     toast.add({
@@ -213,6 +267,10 @@ async function toggleJoin() {
     });
     return;
   }
+  if (event.value?.id === id && res.participantsCount != null) {
+    event.value.schedule = { ...event.value.schedule, participantsCount: res.participantsCount };
+  }
+  void loadParticipants();
   toast.add({
     title: wasJoined ? 'Запись отменена' : 'Вы записались на мероприятие',
     color: 'success',
@@ -249,6 +307,10 @@ type EditFormState = {
   badge: string;
   date: string;
   albumId: string;
+  timeStart: string;
+  timeEnd: string;
+  location: string;
+  maxParticipants: number | null;
 };
 
 const editOpen = ref(false);
@@ -258,6 +320,10 @@ const editState = reactive<EditFormState>({
   badge: '',
   date: '',
   albumId: 'none',
+  timeStart: '',
+  timeEnd: '',
+  location: '',
+  maxParticipants: null,
 });
 
 const editImageFile = ref<File | null>(null);
@@ -282,6 +348,10 @@ function fillEditState() {
   editState.badge       = String((event.value as any).badge ?? '');
   editState.date        = (event.value as any).date ?? '';
   editState.albumId     = event.value.album_id ? String(event.value.album_id) : 'none';
+  editState.timeStart   = event.value.schedule.timeStart;
+  editState.timeEnd     = event.value.schedule.timeEnd;
+  editState.location    = event.value.schedule.location;
+  editState.maxParticipants = event.value.schedule.maxParticipants;
   editDateValue.value   = toCalendarDate(editState.date);
   editImageFile.value = null;
 }
@@ -304,6 +374,10 @@ function validateEdit(): boolean {
   }
   if (!editState.date) {
     editError.value = 'Выберите дату проведения.';
+    return false;
+  }
+  if (editState.timeStart && editState.timeEnd && editState.timeEnd < editState.timeStart) {
+    editError.value = 'Время окончания раньше начала.';
     return false;
   }
   editError.value = null;
@@ -333,6 +407,7 @@ async function handleEditSubmit() {
         badge:       editState.badge || null,
         date:        editState.date,
         album_id:    editState.albumId && editState.albumId !== 'none' ? Number(editState.albumId) : null,
+        ...eventScheduleBody(editState),
         ...imagePatch,
       },
     });
@@ -647,14 +722,14 @@ onUnmounted(() => {
 
               <div v-if="!isKiosk" class="flex flex-wrap gap-2 pt-1">
                 <UButton
-                  :color="isArchivedEvent ? 'neutral' : (isJoined ? 'neutral' : 'primary')"
-                  :variant="isArchivedEvent ? 'outline' : (isJoined ? 'soft' : 'solid')"
+                  :color="isArchivedEvent || (isFull && !isJoined) ? 'neutral' : (isJoined ? 'neutral' : 'primary')"
+                  :variant="isArchivedEvent || (isFull && !isJoined) ? 'outline' : (isJoined ? 'soft' : 'solid')"
                   size="lg"
-                  :icon="isArchivedEvent ? 'i-lucide-lock' : (isJoined ? 'i-lucide-check' : 'i-lucide-ticket')"
-                  :disabled="isArchivedEvent"
+                  :icon="isArchivedEvent || (isFull && !isJoined) ? 'i-lucide-lock' : (isJoined ? 'i-lucide-check' : 'i-lucide-ticket')"
+                  :disabled="isArchivedEvent || (isFull && !isJoined)"
                   @click="toggleJoin"
                 >
-                  {{ isArchivedEvent ? 'Запись недоступна' : (isJoined ? 'Вы записаны' : 'Записаться') }}
+                  {{ isArchivedEvent ? 'Запись недоступна' : isJoined ? 'Вы записаны' : isFull ? 'Мест нет' : 'Записаться' }}
                 </UButton>
 
                 <UButton color="neutral" variant="outline" size="lg" icon="i-lucide-link" @click="copyEventLink">
@@ -682,6 +757,28 @@ onUnmounted(() => {
                 </div>
 
                 <div class="flex items-start justify-between gap-3">
+                  <dt :class="isKiosk ? 'text-xl text-muted' : 'text-sm text-muted'">Время</dt>
+                  <dd :class="isKiosk ? 'text-xl font-medium text-highlighted text-right' : 'text-sm font-medium text-highlighted text-right'">
+                    {{ timeLabel || 'Уточняется' }}
+                  </dd>
+                </div>
+
+                <div class="flex items-start justify-between gap-3">
+                  <dt :class="isKiosk ? 'text-xl text-muted' : 'text-sm text-muted'">Место</dt>
+                  <dd :class="isKiosk ? 'text-xl font-medium text-highlighted text-right' : 'text-sm font-medium text-highlighted text-right'">
+                    {{ event.schedule.location || 'Уточняется' }}
+                  </dd>
+                </div>
+
+                <div class="flex items-start justify-between gap-3">
+                  <dt :class="isKiosk ? 'text-xl text-muted' : 'text-sm text-muted'">Участники</dt>
+                  <dd :class="isKiosk ? 'text-xl font-medium text-highlighted text-right' : 'text-sm font-medium text-highlighted text-right'">
+                    {{ seatsLabel }}
+                    <span v-if="isFull" class="block text-warning font-normal">мест больше нет</span>
+                  </dd>
+                </div>
+
+                <div class="flex items-start justify-between gap-3">
                   <dt :class="isKiosk ? 'text-xl text-muted' : 'text-sm text-muted'">Статус</dt>
                   <dd :class="isKiosk ? 'text-xl font-medium text-highlighted text-right' : 'text-sm font-medium text-highlighted text-right'">
                     {{
@@ -698,6 +795,52 @@ onUnmounted(() => {
                   Открыть страницу
                 </UButton>
               </div>
+            </UCard>
+
+            <!-- Записавшиеся — только организаторам (ADR-054) -->
+            <UCard v-if="showParticipants" class="rounded-lg">
+              <template #header>
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2">
+                    <UIcon name="i-lucide-users" class="size-5 text-primary" aria-hidden="true" />
+                    <span class="text-sm font-semibold text-highlighted">Записавшиеся</span>
+                  </div>
+                  <span class="text-sm text-muted tabular-nums">{{ seatsLabel }}</span>
+                </div>
+              </template>
+
+              <div v-if="participantsLoading && !participants.length" class="flex flex-col gap-3">
+                <div v-for="i in 3" :key="i" class="flex items-center gap-3">
+                  <USkeleton class="size-8 rounded-full" />
+                  <USkeleton class="h-4 w-40" />
+                </div>
+              </div>
+              <div v-else-if="participantsError" class="flex flex-col items-start gap-2">
+                <p class="text-sm text-error">{{ participantsError }}</p>
+                <UButton size="xs" color="neutral" variant="outline" label="Повторить" @click="loadParticipants" />
+              </div>
+              <UEmpty
+                v-else-if="!participants.length"
+                variant="naked"
+                icon="i-lucide-user-round-x"
+                title="Пока никто не записался"
+                description="Сотрудники появятся здесь, как только нажмут «Записаться»."
+              />
+              <ol v-else class="flex flex-col gap-1 max-h-96 overflow-y-auto">
+                <li v-for="(p, i) in participants" :key="p.id">
+                  <RouterLink
+                    :to="`/profile/${p.id}`"
+                    class="flex items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-elevated"
+                  >
+                    <span class="w-5 shrink-0 text-right text-xs text-dimmed tabular-nums">{{ i + 1 }}</span>
+                    <UAvatar :src="userAvatarSrc(p)" :alt="p.name" size="sm" class="shrink-0" />
+                    <span class="min-w-0 flex-1">
+                      <span class="block truncate text-sm text-highlighted">{{ p.name }}</span>
+                      <span class="block text-xs text-muted">{{ formatJoinedAt(p.joinedAt) }}</span>
+                    </span>
+                  </RouterLink>
+                </li>
+              </ol>
             </UCard>
           </div>
         </div>
@@ -758,6 +901,14 @@ onUnmounted(() => {
                 </template>
               </UInputDate>
             </UFormField>
+
+            <EventScheduleFields
+              v-model:time-start="editState.timeStart"
+              v-model:time-end="editState.timeEnd"
+              v-model:location="editState.location"
+              v-model:max-participants="editState.maxParticipants"
+              size="lg"
+            />
 
             <UFormField label="Альбом фотогалереи" name="albumId">
               <USelect
