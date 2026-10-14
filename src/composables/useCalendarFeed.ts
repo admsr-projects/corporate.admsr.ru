@@ -4,7 +4,7 @@ import { useCoursesStore, type EnrollmentSummary } from './useCoursesStore';
 import { apiSessionFetch, getAuthUser } from './useAuthSession';
 import { useEventRsvp } from './useEventRsvp';
 import { useBirthdayGreetings } from './useBirthdayGreetings';
-import { eventTimeLabel, readEventSchedule } from './eventSchedule';
+import { eventDescriptionText, eventTimeLabel, readEventSchedule } from './eventSchedule';
 
 export type CalendarSource = 'event' | 'meeting' | 'birthday' | 'learning' | 'personal';
 
@@ -271,17 +271,20 @@ export function useCalendarFeed() {
     const out: CalendarItem[] = [];
 
     for (const ev of rawEvents.value) {
+      const id = String(ev.id);
+      // В календаре — только мероприятия, на которые записались (ADR-055); новые видны
+      // в виджете «Мероприятия» на рабочем столе и в афише.
+      if (!isRsvpJoined(id)) continue;
       const dateRaw = String(ev?.date ?? '').trim();
       const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateRaw);
       if (!m) continue;
       const dateKey = `${m[1]}-${m[2]}-${m[3]}`;
-      const text = `${ev?.description ?? ''} ${ev?.title ?? ''}`;
+      const text = `${eventDescriptionText(String(ev?.description ?? ''))} ${ev?.title ?? ''}`;
       // Поля V22 (ADR-054); у старых мероприятий без них — из текста описания.
       const sched = readEventSchedule(ev);
       const time = sched.timeStart
         ? { start: sched.timeStart, end: sched.timeEnd || undefined, label: eventTimeLabel(sched) }
         : extractTimeRange(text);
-      const id = String(ev.id);
       out.push({
         id: `event-${id}`,
         source: 'event',

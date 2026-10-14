@@ -11,14 +11,20 @@ import { slideoverPopoverContent, slideoverSelectContent } from '../../composabl
 import { toCalendarDate } from '../../utils/date';
 import { userAvatarSrc } from '../../utils/userName';
 import {
+  eventDescriptionBody,
+  eventDescriptionForEditor,
+  eventDescriptionText,
   eventScheduleBody,
   eventSeatsLabel,
   eventTimeLabel,
   isEventFull,
+  isHtmlDescription,
   readEventSchedule,
   type EventSchedule,
 } from '../../composables/eventSchedule';
+import { newsEditorHtmlClass } from '../../composables/newsEditorHtmlClass';
 import EventScheduleFields from './components/EventScheduleFields.vue';
+import EventDescriptionEditor from './components/EventDescriptionEditor.vue';
 
 type EventPost = BlogPostProps & {
   id?: number;
@@ -78,7 +84,9 @@ const editBadgeOptions = [
 ];
 
 // ─── API ─────────────────────────────────────────────────────────────────────
-function firstSentence(text: string): string {
+/** Первое предложение описания — без разметки (описание — HTML из редактора, ADR-055). */
+function firstSentence(raw: string): string {
+  const text = eventDescriptionText(raw);
   if (!text) return text;
   return text.match(/^[^.!?]*[.!?]/)?.[0].trim() ?? text;
 }
@@ -344,7 +352,7 @@ const editError = ref<string | null>(null);
 function fillEditState() {
   if (!event.value) return;
   editState.title       = event.value.title ?? '';
-  editState.description = event.value.description ?? '';
+  editState.description = eventDescriptionForEditor(event.value.description ?? '');
   editState.badge       = String((event.value as any).badge ?? '');
   editState.date        = (event.value as any).date ?? '';
   editState.albumId     = event.value.album_id ? String(event.value.album_id) : 'none';
@@ -403,7 +411,7 @@ async function handleEditSubmit() {
       method: 'PUT',
       json: {
         title:       editState.title.trim(),
-        description: editState.description.trim() || null,
+        description: eventDescriptionBody(editState.description),
         badge:       editState.badge || null,
         date:        editState.date,
         album_id:    editState.albumId && editState.albumId !== 'none' ? Number(editState.albumId) : null,
@@ -709,9 +717,15 @@ onUnmounted(() => {
             </template>
 
             <div class="space-y-4">
+              <!-- HTML из редактора мероприятий (только у организаторов, как у новостей) -->
+              <div
+                v-if="event.description && isHtmlDescription(event.description)"
+                :class="[newsEditorHtmlClass, 'sm:px-0 text-default', isKiosk ? 'text-3xl' : 'text-base']"
+                v-html="event.description"
+              />
               <p
-                v-if="event.description"
-                class="leading-relaxed text-muted"
+                v-else-if="event.description"
+                class="leading-relaxed text-muted whitespace-pre-line"
                 :class="isKiosk ? 'text-3xl' : 'text-base leading-6'"
               >
                 {{ event.description }}
@@ -882,7 +896,7 @@ onUnmounted(() => {
             </UFormField>
 
             <UFormField label="Описание" name="description">
-              <UTextarea v-model="editState.description" size="lg" :rows="3" placeholder="Описание мероприятия" class="w-full" />
+              <EventDescriptionEditor v-model="editState.description" />
             </UFormField>
 
             <UFormField label="Дата проведения" name="date" required>

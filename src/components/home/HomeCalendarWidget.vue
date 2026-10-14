@@ -110,7 +110,7 @@ function openItem(item: CalendarItem) {
           <h2 class="text-lg font-bold leading-7 text-highlighted truncate">
             Календарь
           </h2>
-          <UTooltip text="Ближайшие встречи, мероприятия, обучение и личные события">
+          <UTooltip text="Ближайшие встречи, мероприятия, на которые вы записались, обучение и личные события">
             <UButton
               type="button"
               color="neutral"

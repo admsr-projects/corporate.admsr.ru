@@ -38,7 +38,7 @@
 | Что | Где |
 |-----|-----|
 | Страница | `src/pages/HomePage.vue` (693 строки) |
-| Виджеты | `src/components/home/HomeNewsCard.vue`, `HomeCalendarWidget.vue`, `HomeAbsenceWidget.vue` |
+| Виджеты | `src/components/home/HomeNewsCard.vue`, `HomeCalendarWidget.vue`, `HomeEventsWidget.vue` («Мероприятия»: ближайшие предстоящие, без «Архива», до 5; ADR-055), `HomeAbsenceWidget.vue` |
 | Виджет обучения | `src/pages/Courses/components/LearningHomeWidget.vue` |
 | Лента | `src/composables/useNewsFeed.ts` + `src/stores/newsFeed.ts` |
 | Плитки сервисов | `src/composables/usePortalServices.ts` |
@@ -122,6 +122,13 @@
 по-прежнему угадываются из текста описания (афиша, календарь). Лимит заполнен — «Мест нет», сервер отвечает 409.
 Карточка «Записавшиеся» на странице мероприятия — только организаторам (правка раздела «Мероприятия»):
 `event_rsvp.php?eventId=`. Время и место мероприятия видны и в календаре, и в напоминании накануне.
+
+**Календарь, виджет, описание (ADR-055).** В календаре — только мероприятия, на которые сотрудник записался;
+новые видны в афише и в виджете «Мероприятия» на рабочем столе (`src/components/home/HomeEventsWidget.vue`).
+Описание — HTML из того же редактора, что у новостей (`src/pages/Events/components/EventDescriptionEditor.vue`);
+показ — `v-html` с `newsEditorHtmlClass`, превью и поиск времени/места — по тексту без разметки
+(`eventDescriptionText` в `eventSchedule.ts`). Старые текстовые описания показываются как текст с переносами,
+в редакторе открываются абзацами.
 
 Генерация WebP-обложек: `npm run images:webp` → `scripts/generate-events-webp.mjs`.
 

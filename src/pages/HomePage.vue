@@ -15,6 +15,7 @@ import LearningHomeWidget from './Courses/components/LearningHomeWidget.vue';
 import HomeNewsCard from '../components/home/HomeNewsCard.vue';
 import { DEVBLOG_AUTHOR, isDevblogCategory } from '../composables/useDevblog';
 import HomeCalendarWidget from '../components/home/HomeCalendarWidget.vue';
+import HomeEventsWidget from '../components/home/HomeEventsWidget.vue';
 import HomeAbsenceWidget from '../components/home/HomeAbsenceWidget.vue';
 import { usePortalServices } from '../composables/usePortalServices';
 
@@ -25,6 +26,7 @@ const canEditBirthdays = computed(() => canEditSection('birthdays'));
 
 const learningAsideVisible = ref(false);
 const calendarAsideVisible = ref(false);
+const eventsAsideVisible = ref(false);
 
 const { enabledServices, ensureLoaded: ensurePortalServices } = usePortalServices();
 ensurePortalServices();
@@ -276,6 +278,7 @@ const hasAsideContent = computed(
     hasActiveAbsence.value ||
     learningAsideVisible.value ||
     calendarAsideVisible.value ||
+    eventsAsideVisible.value ||
     showBirthdaysWidget.value,
 );
 
@@ -556,6 +559,7 @@ onUnmounted(() => {
 
           <LearningHomeWidget @visible="learningAsideVisible = $event" />
           <HomeCalendarWidget @visible="calendarAsideVisible = $event" />
+          <HomeEventsWidget @visible="eventsAsideVisible = $event" />
 
           <UCard
             v-if="showBirthdaysWidget"

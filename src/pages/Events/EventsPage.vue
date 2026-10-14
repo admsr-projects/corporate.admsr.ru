@@ -12,6 +12,8 @@ import { useFeedSentinel } from '../../composables/useFeedSentinel';
 import { useAppToast } from '../../composables/useAppToast';
 import { useEventRsvp } from '../../composables/useEventRsvp';
 import {
+  eventDescriptionBody,
+  eventDescriptionText,
   eventScheduleBody,
   eventSeatsLabel,
   eventTimeLabel,
@@ -20,6 +22,7 @@ import {
   type EventSchedule,
 } from '../../composables/eventSchedule';
 import EventScheduleFields from './components/EventScheduleFields.vue';
+import EventDescriptionEditor from './components/EventDescriptionEditor.vue';
 
 type EventPost = BlogPostProps & {
   id?: number;
@@ -133,7 +136,8 @@ function extractPlaceLabel(text: string): string {
 
 function mapEvent(raw: any): EventPost {
   const rawDate = String(raw?.date ?? '').trim();
-  const fullDescription = String(raw?.description ?? '');
+  // Описание — HTML из редактора (ADR-055); для карточки нужен текст.
+  const fullDescription = eventDescriptionText(String(raw?.description ?? ''));
   return {
     id: raw.id,
     title: raw.title,
@@ -436,7 +440,7 @@ async function handleCreateSubmit() {
       method: 'POST',
       json: {
         title: createState.title.trim(),
-        description: createState.description.trim() || null,
+        description: eventDescriptionBody(createState.description),
         badge: createState.badge || null,
         date: createState.date,
         image: imagePath,
@@ -796,13 +800,7 @@ onUnmounted(() => {
           </UFormField>
 
           <UFormField label="Описание" name="description">
-            <UTextarea
-              v-model="createState.description"
-              size="xl"
-              class="w-full"
-              :rows="3"
-              placeholder="Кратко опишите цель и формат мероприятия..."
-            />
+            <EventDescriptionEditor v-model="createState.description" />
           </UFormField>
 
           <UFormField label="Дата проведения" name="date" required>

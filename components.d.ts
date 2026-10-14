@@ -26,6 +26,7 @@ declare module 'vue' {
     FormTake: typeof import('./src/components/tests/FormTake.vue')['default']
     HomeAbsenceWidget: typeof import('./src/components/home/HomeAbsenceWidget.vue')['default']
     HomeCalendarWidget: typeof import('./src/components/home/HomeCalendarWidget.vue')['default']
+    HomeEventsWidget: typeof import('./src/components/home/HomeEventsWidget.vue')['default']
     HomeNewsCard: typeof import('./src/components/home/HomeNewsCard.vue')['default']
     KioskAside: typeof import('./src/components/KioskAside.vue')['default']
     KioskHeader: typeof import('./src/components/KioskHeader.vue')['default']
