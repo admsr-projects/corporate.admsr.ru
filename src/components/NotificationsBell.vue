@@ -79,7 +79,8 @@ function reminderLine(n: PortalNotification): string {
       : days === 0
         ? 'Сегодня'
         : d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
-  return [r.timeStart ? `${day}, ${r.timeStart}` : day, r.location].filter(Boolean).join(' · ');
+  const time = r.timeStart && r.timeEnd ? `${r.timeStart}–${r.timeEnd}` : r.timeStart;
+  return [time ? `${day}, ${time}` : day, r.location].filter(Boolean).join(' · ');
 }
 
 async function readAll() {

@@ -26,7 +26,8 @@ import {
 } from '../constants/profileAvatars';
 import {
   defaultAvatarUrl,
-  fetchProfileSnapshot,
+  expireSession,
+  loadProfileSnapshot,
   isOfoUnset,
   isProfileIncomplete,
   markOnboardingComplete,
@@ -291,11 +292,14 @@ onMounted(async () => {
 
   profileLoading.value = true;
   try {
-    const snap = await fetchProfileSnapshot(userId);
-    if (!snap) {
+    const res = await loadProfileSnapshot(userId);
+    if (res.status !== 'ok') {
+      // Сессия истекла — на вход с «Сессия истекла», а не пустое приветствие.
+      if (res.status === 'unauthorized') expireSession();
       await router.replace({ name: 'login' });
       return;
     }
+    const snap = res.profile;
     if (!isProfileIncomplete(snap)) {
       markOnboardingComplete(userId);
       await router.replace({ name: 'home' });

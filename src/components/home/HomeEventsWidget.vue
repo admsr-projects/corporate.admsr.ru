@@ -7,7 +7,14 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useEventRsvp } from '../../composables/useEventRsvp';
-import { eventSeatsLabel, eventTimeLabel, isEventFull, readEventSchedule, type EventSchedule } from '../../composables/eventSchedule';
+import {
+  eventSeatsLabel,
+  eventTimeLabel,
+  isEventFull,
+  readEventSchedule,
+  slotTimeLabel,
+  type EventSchedule,
+} from '../../composables/eventSchedule';
 import { toDateKey } from '../../composables/useCalendarFeed';
 
 const emit = defineEmits<{ visible: [value: boolean] }>();
@@ -19,7 +26,7 @@ const weekdayShort = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'] as
 type HomeEvent = { id: number; title: string; dateKey: string; schedule: EventSchedule };
 
 const router = useRouter();
-const { ensureLoaded: ensureRsvpLoaded, isJoined } = useEventRsvp();
+const { ensureLoaded: ensureRsvpLoaded, isJoined, joinedSlot } = useEventRsvp();
 
 const loading = ref(true);
 const error = ref('');
@@ -68,6 +75,13 @@ function dateLabel(dateKey: string): string {
   if (toDateKey(today) === dateKey) return 'Сегодня';
   if (toDateKey(tomorrow) === dateKey) return 'Завтра';
   return `${weekdayShort[date.getDay()]}, ${d} ${monthNamesShort[date.getMonth()]}`;
+}
+
+/** «Вы записаны» и время, если у мероприятия их несколько (ADR-056). */
+function joinedLabel(e: HomeEvent): string {
+  if (e.schedule.slots.length < 2) return 'Вы записаны';
+  const slot = e.schedule.slots.find((s) => s.id === joinedSlot(e.id));
+  return slot && slotTimeLabel(slot) ? `Вы записаны · ${slotTimeLabel(slot)}` : 'Вы записаны';
 }
 
 function metaLine(e: HomeEvent): string {
@@ -135,7 +149,7 @@ watch(showWidget, (v) => emit('visible', v), { immediate: true });
         <p class="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs">
           <span v-if="isJoined(e.id)" class="inline-flex items-center gap-1 text-primary">
             <UIcon name="i-lucide-check" class="size-3" aria-hidden="true" />
-            Вы записаны
+            {{ joinedLabel(e) }}
           </span>
           <span v-else-if="isEventFull(e.schedule)" class="text-warning">Мест нет</span>
           <span class="text-dimmed">{{ eventSeatsLabel(e.schedule) }}</span>

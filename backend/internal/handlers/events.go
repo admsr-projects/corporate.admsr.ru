@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,17 +37,12 @@ type eventRow struct {
 	AlbumName   *string
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
-	eventSchedule
-	// Participants — сколько записалось (event_rsvps).
+	// Location — место (V22, одно на все времена).
+	Location *string
+	// SlotsJSON — времена мероприятия (V23, ADR-056), см. eventSlotsJSON.
+	SlotsJSON string
+	// Participants — сколько записалось на все времена (event_rsvps).
 	Participants int64
-}
-
-// eventSchedule — время, место и лимит мест (V22, ADR-054). nil — не указано.
-type eventSchedule struct {
-	TimeStart       *string // 'HH:MM'
-	TimeEnd         *string // 'HH:MM'
-	Location        *string
-	MaxParticipants *int32 // nil — без ограничения
 }
 
 const (
@@ -57,21 +52,20 @@ const (
 
 // eventCols — колонки для eventRow.dest(); таблица — под псевдонимом e.
 const eventCols = `e.id, e.title, e.description, e.badge, e.date, e.image, e.image_full, e.album_id,
-	e.created_at, e.updated_at, e.time_start, e.time_end, e.location, e.max_participants,
+	e.created_at, e.updated_at, e.location, ` + eventSlotsJSON + `,
 	(SELECT COUNT(*) FROM public.event_rsvps r WHERE r.event_id = e.id)`
 
 func (row *eventRow) dest() []any {
 	return []any{
 		&row.ID, &row.Title, &row.Description, &row.Badge, &row.Date, &row.Image, &row.ImageFull, &row.AlbumID,
-		&row.CreatedAt, &row.UpdatedAt, &row.TimeStart, &row.TimeEnd, &row.Location, &row.MaxParticipants,
-		&row.Participants,
+		&row.CreatedAt, &row.UpdatedAt, &row.Location, &row.SlotsJSON, &row.Participants,
 	}
 }
 
-// eventsFailDB — без V22 (нет колонок времени, места, лимита) — понятный 503 вместо «ошибки БД».
+// eventsFailDB — без V22/V23 (нет места или таблицы времён) — понятный 503 вместо «ошибки БД».
 func eventsFailDB(w http.ResponseWriter, err error, fallback string) {
-	if isUndefinedColumn(err) {
-		httpx.Fail(w, http.StatusServiceUnavailable, "Мероприятия не обновлены на сервере: нужна миграция V22__events_schedule_limit.sql")
+	if isUndefinedColumn(err) || isUndefinedTable(err) {
+		httpx.Fail(w, http.StatusServiceUnavailable, "Мероприятия не обновлены на сервере: нужны миграции V22__events_schedule_limit.sql и V23__event_slots.sql")
 		return
 	}
 	httpx.Fail(w, http.StatusInternalServerError, fallback)
@@ -92,55 +86,6 @@ func normalizeEventTime(v any) (*string, bool) {
 	h, _ := strconv.Atoi(m[1])
 	t := fmt.Sprintf("%02d:%s", h, m[2])
 	return &t, true
-}
-
-// parseEventSchedule — время, место, лимит из тела запроса. Ключа нет — остаётся
-// значение из cur (при правке — текущее). Вторым значением — текст ошибки для 422.
-func parseEventSchedule(d map[string]any, cur eventSchedule) (eventSchedule, string) {
-	out := cur
-	if v, ok := d["time_start"]; ok {
-		t, valid := normalizeEventTime(v)
-		if !valid {
-			return out, "Время начала — в формате ЧЧ:ММ"
-		}
-		out.TimeStart = t
-	}
-	if v, ok := d["time_end"]; ok {
-		t, valid := normalizeEventTime(v)
-		if !valid {
-			return out, "Время окончания — в формате ЧЧ:ММ"
-		}
-		out.TimeEnd = t
-	}
-	if out.TimeEnd != nil && out.TimeStart == nil {
-		return out, "Укажите время начала"
-	}
-	if out.TimeEnd != nil && *out.TimeEnd < *out.TimeStart {
-		return out, "Окончание раньше начала"
-	}
-	if v, ok := d["location"]; ok {
-		loc := strings.TrimSpace(strVal(v))
-		if utf8.RuneCountInString(loc) > eventLocationMax {
-			return out, "Место — не длиннее " + strconv.Itoa(eventLocationMax) + " символов"
-		}
-		out.Location = nil
-		if loc != "" {
-			out.Location = &loc
-		}
-	}
-	if v, ok := d["max_participants"]; ok {
-		raw := strings.TrimSpace(strVal(v))
-		out.MaxParticipants = nil
-		if raw != "" && raw != "0" {
-			n, err := strconv.Atoi(raw)
-			if err != nil || n < 1 || n > eventParticipantsMax {
-				return out, "Лимит мест — целое число от 1 (пусто — без ограничения)"
-			}
-			n32 := int32(n)
-			out.MaxParticipants = &n32
-		}
-	}
-	return out, ""
 }
 
 func (h *Events) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -220,10 +165,18 @@ func (h *Events) post(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sched, msg := parseEventSchedule(d, eventSchedule{})
+	location, msg := parseEventLocation(d, nil)
 	if msg != "" {
 		httpx.Fail(w, http.StatusUnprocessableEntity, msg)
 		return
+	}
+	slots, _, msg := parseEventSlots(d)
+	if msg != "" {
+		httpx.Fail(w, http.StatusUnprocessableEntity, msg)
+		return
+	}
+	if len(slots) == 0 {
+		slots = []eventSlotInput{{}}
 	}
 
 	albumID, err := h.parseAlbumID(r.Context(), w, d, true)
@@ -252,11 +205,18 @@ func (h *Events) post(w http.ResponseWriter, r *http.Request) {
 		badge = &s
 	}
 
+	ctx := r.Context()
+	tx, err := h.Pool.Begin(ctx)
+	if err != nil {
+		httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+		return
+	}
+	defer tx.Rollback(ctx)
+
 	var newID int64
-	err = h.Pool.QueryRow(r.Context(), `
-		INSERT INTO public.events (title, description, badge, date, image, image_full, album_id,
-			time_start, time_end, location, max_participants)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+	err = tx.QueryRow(ctx, `
+		INSERT INTO public.events (title, description, badge, date, image, image_full, album_id, location)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
 		strings.TrimSpace(strVal(d["title"])),
 		desc,
 		badge,
@@ -264,11 +224,17 @@ func (h *Events) post(w http.ResponseWriter, r *http.Request) {
 		image,
 		imageFull,
 		albumID,
-		sched.TimeStart, sched.TimeEnd, sched.Location, sched.MaxParticipants,
+		location,
 	).Scan(&newID)
+	if err == nil {
+		err = syncEventSlots(ctx, tx, newID, slots)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
 	if err != nil {
-		if isUndefinedColumn(err) {
-			eventsFailDB(w, err, "")
+		if isUndefinedColumn(err) || strings.Contains(err.Error(), "event_slots") {
+			eventsFailDB(w, err, "Ошибка БД: "+err.Error())
 			return
 		}
 		if strings.Contains(strings.ToLower(err.Error()), "album_id") {
@@ -313,11 +279,11 @@ func (h *Events) put(w http.ResponseWriter, r *http.Request) {
 
 	var curImage, curImageFull string
 	var curAlbumID *int64
-	var cur eventSchedule
+	var curLocation *string
 	err := h.Pool.QueryRow(r.Context(), `
-		SELECT image, image_full, album_id, time_start, time_end, location, max_participants
+		SELECT image, image_full, album_id, location
 		FROM public.events WHERE id = $1`, id).
-		Scan(&curImage, &curImageFull, &curAlbumID, &cur.TimeStart, &cur.TimeEnd, &cur.Location, &cur.MaxParticipants)
+		Scan(&curImage, &curImageFull, &curAlbumID, &curLocation)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			httpx.Fail(w, http.StatusNotFound, "Мероприятие не найдено")
@@ -326,8 +292,14 @@ func (h *Events) put(w http.ResponseWriter, r *http.Request) {
 		eventsFailDB(w, err, "Ошибка подключения к БД")
 		return
 	}
-	// Лимит можно опустить ниже числа записавшихся: уже записанные остаются, новых не пускаем.
-	sched, msg := parseEventSchedule(d, cur)
+	location, msg := parseEventLocation(d, curLocation)
+	if msg != "" {
+		httpx.Fail(w, http.StatusUnprocessableEntity, msg)
+		return
+	}
+	// Лимит времени можно опустить ниже числа записавшихся: уже записанные остаются,
+	// новых не пускаем. Время, которого нет в списке, удаляется вместе с записями на него.
+	slots, slotsPresent, msg := parseEventSlots(d)
 	if msg != "" {
 		httpx.Fail(w, http.StatusUnprocessableEntity, msg)
 		return
@@ -362,12 +334,19 @@ func (h *Events) put(w http.ResponseWriter, r *http.Request) {
 		badge = &s
 	}
 
-	_, err = h.Pool.Exec(r.Context(), `
+	ctx := r.Context()
+	tx, err := h.Pool.Begin(ctx)
+	if err != nil {
+		httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
 		UPDATE public.events
 		SET title = $1, description = $2, badge = $3, date = $4,
-		    image = $5, image_full = $6, album_id = $7,
-		    time_start = $8, time_end = $9, location = $10, max_participants = $11, updated_at = NOW()
-		WHERE id = $12`,
+		    image = $5, image_full = $6, album_id = $7, location = $8, updated_at = NOW()
+		WHERE id = $9`,
 		strings.TrimSpace(strVal(d["title"])),
 		desc,
 		badge,
@@ -375,10 +354,20 @@ func (h *Events) put(w http.ResponseWriter, r *http.Request) {
 		image,
 		imageFull,
 		albumID,
-		sched.TimeStart, sched.TimeEnd, sched.Location, sched.MaxParticipants,
+		location,
 		id,
 	)
+	if err == nil && slotsPresent {
+		err = syncEventSlots(ctx, tx, id, slots)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
 	if err != nil {
+		if isUndefinedColumn(err) || strings.Contains(err.Error(), "event_slots") {
+			eventsFailDB(w, err, "Ошибка БД: "+err.Error())
+			return
+		}
 		if strings.Contains(strings.ToLower(err.Error()), "album_id") {
 			httpx.Fail(w, http.StatusInternalServerError, "В БД нет колонки events.album_id. Примените миграцию db/migration/V7__events_gallery_album.sql")
 			return
@@ -642,11 +631,9 @@ func fmtEvent(r eventRow) map[string]any {
 		"album_name":  r.AlbumName,
 		"created_at":  formatTime(r.CreatedAt),
 		"updated_at":  formatTime(r.UpdatedAt),
-		// V22: пустая строка / null — не указано (фронт пишет «уточняется», «без ограничения»).
-		"time_start":         derefStr(r.TimeStart),
-		"time_end":           derefStr(r.TimeEnd),
+		// V22/V23: место — одно на мероприятие; времена — со своими лимитами и числом записавшихся.
 		"location":           derefStr(r.Location),
-		"max_participants":   r.MaxParticipants,
+		"slots":              json.RawMessage(r.SlotsJSON),
 		"participants_count": r.Participants,
 	}
 }

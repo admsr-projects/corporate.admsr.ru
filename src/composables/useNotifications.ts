@@ -20,6 +20,8 @@ export type NotificationReminder = {
   /** YYYY-MM-DD */
   date: string;
   timeStart: string;
+  /** Окончание — для мероприятия: время, на которое записан (V23) */
+  timeEnd: string;
   location: string;
   /** '#rrggbb' личного события или '' */
   color: string;
@@ -108,6 +110,7 @@ function normalize(raw: any): PortalNotification {
           title: String(raw.reminder.title ?? ''),
           date: String(raw.reminder.date ?? ''),
           timeStart: String(raw.reminder.timeStart ?? ''),
+          timeEnd: String(raw.reminder.timeEnd ?? ''),
           location: String(raw.reminder.location ?? ''),
           color: String(raw.reminder.color ?? ''),
           calendarEntryId: raw.reminder.calendarEntryId != null ? Number(raw.reminder.calendarEntryId) : null,

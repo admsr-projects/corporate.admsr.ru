@@ -5,7 +5,7 @@ import type { BlogPostProps } from '@nuxt/ui';
 import { useSectionAccess } from '../../composables/useSectionAccess';
 import { apiSessionFetch } from '../../composables/useAuthSession';
 import { useAppToast } from '../../composables/useAppToast';
-import { useEventRsvp } from '../../composables/useEventRsvp';
+import { applyRsvpCounts, useEventRsvp } from '../../composables/useEventRsvp';
 import { useGalleryData } from '../../composables/useGalleryData';
 import { slideoverPopoverContent, slideoverSelectContent } from '../../composables/slideoverFieldUi';
 import { toCalendarDate } from '../../utils/date';
@@ -15,12 +15,19 @@ import {
   eventDescriptionForEditor,
   eventDescriptionText,
   eventScheduleBody,
+  badSlotOrder,
   eventSeatsLabel,
   eventTimeLabel,
   isEventFull,
   isHtmlDescription,
+  isSlotFull,
   readEventSchedule,
+  slotDraftsOf,
+  slotSeatsLabel,
+  slotTimeLabel,
   type EventSchedule,
+  type EventSlot,
+  type EventSlotDraft,
 } from '../../composables/eventSchedule';
 import { newsEditorHtmlClass } from '../../composables/newsEditorHtmlClass';
 import EventScheduleFields from './components/EventScheduleFields.vue';
@@ -36,7 +43,7 @@ type EventPost = BlogPostProps & {
   schedule: EventSchedule;
 };
 
-type EventParticipant = { id: number; name: string; avatar_url: string; joinedAt: string };
+type EventParticipant = { id: number; name: string; avatar_url: string; joinedAt: string; slotId: number | null };
 
 type AlbumPhoto = {
   id: string;
@@ -218,12 +225,32 @@ watch(
 );
 
 // ─── Запись на мероприятие (сервер, V16) ──────────────────────────────────────
-const { ensureLoaded: ensureRsvpLoaded, isJoined: isJoinedEvent, setJoined } = useEventRsvp();
+const { ensureLoaded: ensureRsvpLoaded, isJoined: isJoinedEvent, joinedSlot, setJoined } = useEventRsvp();
 const isJoined = computed(() => isJoinedEvent(event.value?.id));
 /** Лимит мест заполнен (V22) — записаться нельзя, отменить свою запись можно. */
 const isFull = computed(() => !!event.value && isEventFull(event.value.schedule));
 const timeLabel = computed(() => (event.value ? eventTimeLabel(event.value.schedule) : ''));
 const seatsLabel = computed(() => (event.value ? eventSeatsLabel(event.value.schedule) : ''));
+/** Несколько времён (ADR-056) — сотрудник выбирает, на какое записаться. */
+const slots = computed<EventSlot[]>(() => event.value?.schedule.slots ?? []);
+const multiSlot = computed(() => slots.value.length > 1);
+const mySlotId = computed(() => joinedSlot(event.value?.id));
+
+/** Записавшиеся по временам — для карточки организатора. */
+const participantGroups = computed(() => {
+  const list = participants.value;
+  if (!multiSlot.value) return [{ key: 'all', label: '', seats: '', people: list }];
+  const groups = slots.value.map((s) => ({
+    key: String(s.id),
+    label: slotTimeLabel(s) || 'Время уточняется',
+    seats: slotSeatsLabel(s),
+    people: list.filter((p) => p.slotId === s.id),
+  }));
+  const known = new Set(slots.value.map((s) => s.id));
+  const rest = list.filter((p) => p.slotId == null || !known.has(p.slotId));
+  if (rest.length) groups.push({ key: 'none', label: 'Без времени', seats: '', people: rest });
+  return groups;
+});
 
 // ─── Записавшиеся — только организаторам (правка раздела «Мероприятия», ADR-054) ───
 const participants = ref<EventParticipant[]>([]);
@@ -259,13 +286,19 @@ function formatJoinedAt(iso: string): string {
   return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).format(d);
 }
 
-async function toggleJoin() {
+/**
+ * Одно время — записаться / отменить. Несколько — slot: записаться на него, перезаписаться
+ * с другого или (если уже на нём) отменить запись.
+ */
+async function toggleJoin(slot?: EventSlot) {
   const id = event.value?.id;
   if (!id) return;
   if (isArchivedEvent.value) return;
   const wasJoined = isJoined.value;
-  if (!wasJoined && isFull.value) return;
-  const res = await setJoined(id, !wasJoined);
+  const cancel = wasJoined && (!slot || mySlotId.value === slot.id);
+  const moving = wasJoined && !cancel;
+  if (!cancel && (slot ? isSlotFull(slot) : isFull.value)) return;
+  const res = await setJoined(id, !cancel, slot?.id);
   if (!res.ok) {
     toast.add({
       title: 'Не удалось сохранить запись',
@@ -275,12 +308,12 @@ async function toggleJoin() {
     });
     return;
   }
-  if (event.value?.id === id && res.participantsCount != null) {
-    event.value.schedule = { ...event.value.schedule, participantsCount: res.participantsCount };
-  }
+  if (event.value?.id === id) event.value.schedule = applyRsvpCounts(event.value.schedule, res);
   void loadParticipants();
+  const when = slot && multiSlot.value ? slotTimeLabel(slot) : '';
   toast.add({
-    title: wasJoined ? 'Запись отменена' : 'Вы записались на мероприятие',
+    title: cancel ? 'Запись отменена' : moving ? 'Время записи изменено' : 'Вы записались на мероприятие',
+    description: !cancel && when ? `Время: ${when}. Напомним накануне.` : undefined,
     color: 'success',
     icon: 'i-lucide-circle-check',
   });
@@ -315,10 +348,8 @@ type EditFormState = {
   badge: string;
   date: string;
   albumId: string;
-  timeStart: string;
-  timeEnd: string;
   location: string;
-  maxParticipants: number | null;
+  slots: EventSlotDraft[];
 };
 
 const editOpen = ref(false);
@@ -328,10 +359,8 @@ const editState = reactive<EditFormState>({
   badge: '',
   date: '',
   albumId: 'none',
-  timeStart: '',
-  timeEnd: '',
   location: '',
-  maxParticipants: null,
+  slots: [],
 });
 
 const editImageFile = ref<File | null>(null);
@@ -356,10 +385,8 @@ function fillEditState() {
   editState.badge       = String((event.value as any).badge ?? '');
   editState.date        = (event.value as any).date ?? '';
   editState.albumId     = event.value.album_id ? String(event.value.album_id) : 'none';
-  editState.timeStart   = event.value.schedule.timeStart;
-  editState.timeEnd     = event.value.schedule.timeEnd;
   editState.location    = event.value.schedule.location;
-  editState.maxParticipants = event.value.schedule.maxParticipants;
+  editState.slots       = slotDraftsOf(event.value.schedule);
   editDateValue.value   = toCalendarDate(editState.date);
   editImageFile.value = null;
 }
@@ -384,8 +411,9 @@ function validateEdit(): boolean {
     editError.value = 'Выберите дату проведения.';
     return false;
   }
-  if (editState.timeStart && editState.timeEnd && editState.timeEnd < editState.timeStart) {
-    editError.value = 'Время окончания раньше начала.';
+  const bad = badSlotOrder(editState.slots);
+  if (bad) {
+    editError.value = editState.slots.length > 1 ? `Время ${bad}: окончание раньше начала.` : 'Время окончания раньше начала.';
     return false;
   }
   editError.value = null;
@@ -734,14 +762,58 @@ onUnmounted(() => {
                 Описание мероприятия пока не добавлено.
               </p>
 
-              <div v-if="!isKiosk" class="flex flex-wrap gap-2 pt-1">
+              <!-- Несколько времён: выбор, на какое записаться (ADR-056) -->
+              <div v-if="!isKiosk && multiSlot" class="flex flex-col gap-2 pt-1">
+                <p class="text-sm font-medium text-highlighted">
+                  {{ isArchivedEvent ? 'Времена' : 'Выберите время' }}
+                </p>
+                <div
+                  v-for="slot in slots"
+                  :key="slot.id"
+                  class="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2"
+                  :class="mySlotId === slot.id ? 'border-primary bg-primary/5' : 'border-default'"
+                >
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm font-medium text-highlighted tabular-nums">{{ slotTimeLabel(slot) || 'Время уточняется' }}</p>
+                    <p class="text-xs" :class="isSlotFull(slot) ? 'text-warning' : 'text-muted'">
+                      {{ isSlotFull(slot) ? `мест нет · ${slotSeatsLabel(slot)}` : slotSeatsLabel(slot) }}
+                    </p>
+                  </div>
+                  <UButton
+                    v-if="mySlotId === slot.id"
+                    color="neutral"
+                    variant="soft"
+                    icon="i-lucide-check"
+                    :disabled="isArchivedEvent"
+                    @click="toggleJoin(slot)"
+                  >
+                    Вы записаны
+                  </UButton>
+                  <UButton
+                    v-else
+                    :color="isJoined ? 'neutral' : 'primary'"
+                    :variant="isJoined ? 'outline' : 'solid'"
+                    :icon="isSlotFull(slot) ? 'i-lucide-lock' : isJoined ? 'i-lucide-repeat' : 'i-lucide-ticket'"
+                    :disabled="isArchivedEvent || isSlotFull(slot)"
+                    @click="toggleJoin(slot)"
+                  >
+                    {{ isSlotFull(slot) ? 'Мест нет' : isJoined ? 'Перезаписаться' : 'Записаться' }}
+                  </UButton>
+                </div>
+                <p v-if="isJoined" class="text-xs text-muted">Нажмите «Вы записаны», чтобы отменить запись.</p>
+                <UButton class="self-start" color="neutral" variant="outline" size="lg" icon="i-lucide-link" @click="copyEventLink">
+                  Скопировать ссылку
+                </UButton>
+              </div>
+
+              <div v-else-if="!isKiosk" class="flex flex-wrap gap-2 pt-1">
                 <UButton
                   :color="isArchivedEvent || (isFull && !isJoined) ? 'neutral' : (isJoined ? 'neutral' : 'primary')"
                   :variant="isArchivedEvent || (isFull && !isJoined) ? 'outline' : (isJoined ? 'soft' : 'solid')"
                   size="lg"
                   :icon="isArchivedEvent || (isFull && !isJoined) ? 'i-lucide-lock' : (isJoined ? 'i-lucide-check' : 'i-lucide-ticket')"
                   :disabled="isArchivedEvent || (isFull && !isJoined)"
-                  @click="toggleJoin"
+                  @click="toggleJoin()"
                 >
                   {{ isArchivedEvent ? 'Запись недоступна' : isJoined ? 'Вы записаны' : isFull ? 'Мест нет' : 'Записаться' }}
                 </UButton>
@@ -773,7 +845,13 @@ onUnmounted(() => {
                 <div class="flex items-start justify-between gap-3">
                   <dt :class="isKiosk ? 'text-xl text-muted' : 'text-sm text-muted'">Время</dt>
                   <dd :class="isKiosk ? 'text-xl font-medium text-highlighted text-right' : 'text-sm font-medium text-highlighted text-right'">
-                    {{ timeLabel || 'Уточняется' }}
+                    <template v-if="multiSlot">
+                      <span v-for="slot in slots" :key="slot.id" class="block tabular-nums">
+                        {{ slotTimeLabel(slot) || 'уточняется' }}
+                        <span v-if="mySlotId === slot.id" class="text-primary font-normal"> · вы записаны</span>
+                      </span>
+                    </template>
+                    <template v-else>{{ timeLabel || 'Уточняется' }}</template>
                   </dd>
                 </div>
 
@@ -840,21 +918,30 @@ onUnmounted(() => {
                 title="Пока никто не записался"
                 description="Сотрудники появятся здесь, как только нажмут «Записаться»."
               />
-              <ol v-else class="flex flex-col gap-1 max-h-96 overflow-y-auto">
-                <li v-for="(p, i) in participants" :key="p.id">
-                  <RouterLink
-                    :to="`/profile/${p.id}`"
-                    class="flex items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-elevated"
-                  >
-                    <span class="w-5 shrink-0 text-right text-xs text-dimmed tabular-nums">{{ i + 1 }}</span>
-                    <UAvatar :src="userAvatarSrc(p)" :alt="p.name" size="sm" class="shrink-0" />
-                    <span class="min-w-0 flex-1">
-                      <span class="block truncate text-sm text-highlighted">{{ p.name }}</span>
-                      <span class="block text-xs text-muted">{{ formatJoinedAt(p.joinedAt) }}</span>
-                    </span>
-                  </RouterLink>
-                </li>
-              </ol>
+              <div v-else class="flex flex-col gap-4 max-h-[32rem] overflow-y-auto">
+                <section v-for="group in participantGroups" :key="group.key" class="flex flex-col gap-1">
+                  <p v-if="group.label" class="flex items-center justify-between gap-2 px-2 text-xs font-medium text-muted">
+                    <span class="tabular-nums">{{ group.label }}</span>
+                    <span v-if="group.seats" class="tabular-nums">{{ group.seats }}</span>
+                  </p>
+                  <p v-if="!group.people.length" class="px-2 text-xs text-dimmed">Никто не записался</p>
+                  <ol class="flex flex-col gap-1">
+                    <li v-for="(p, i) in group.people" :key="p.id">
+                      <RouterLink
+                        :to="`/profile/${p.id}`"
+                        class="flex items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-elevated"
+                      >
+                        <span class="w-5 shrink-0 text-right text-xs text-dimmed tabular-nums">{{ i + 1 }}</span>
+                        <UAvatar :src="userAvatarSrc(p)" :alt="p.name" size="sm" class="shrink-0" />
+                        <span class="min-w-0 flex-1">
+                          <span class="block truncate text-sm text-highlighted">{{ p.name }}</span>
+                          <span class="block text-xs text-muted">{{ formatJoinedAt(p.joinedAt) }}</span>
+                        </span>
+                      </RouterLink>
+                    </li>
+                  </ol>
+                </section>
+              </div>
             </UCard>
           </div>
         </div>
@@ -917,10 +1004,8 @@ onUnmounted(() => {
             </UFormField>
 
             <EventScheduleFields
-              v-model:time-start="editState.timeStart"
-              v-model:time-end="editState.timeEnd"
+              v-model:slots="editState.slots"
               v-model:location="editState.location"
-              v-model:max-participants="editState.maxParticipants"
               size="lg"
             />
 

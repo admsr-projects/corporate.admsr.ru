@@ -4,7 +4,7 @@ import { useCoursesStore, type EnrollmentSummary } from './useCoursesStore';
 import { apiSessionFetch, getAuthUser } from './useAuthSession';
 import { useEventRsvp } from './useEventRsvp';
 import { useBirthdayGreetings } from './useBirthdayGreetings';
-import { eventDescriptionText, eventTimeLabel, readEventSchedule } from './eventSchedule';
+import { eventDescriptionText, readEventSchedule, slotTimeLabel } from './eventSchedule';
 
 export type CalendarSource = 'event' | 'meeting' | 'birthday' | 'learning' | 'personal';
 
@@ -151,7 +151,7 @@ export function useCalendarFeed() {
   } = useBirthdayColleagues();
 
   const courses = useCoursesStore();
-  const { ensureLoaded: ensureRsvpLoaded, isJoined: isRsvpJoined } = useEventRsvp();
+  const { ensureLoaded: ensureRsvpLoaded, isJoined: isRsvpJoined, joinedSlot } = useEventRsvp();
   const greetings = useBirthdayGreetings();
 
   const eventsLoading = ref(false);
@@ -282,8 +282,10 @@ export function useCalendarFeed() {
       const text = `${eventDescriptionText(String(ev?.description ?? ''))} ${ev?.title ?? ''}`;
       // Поля V22 (ADR-054); у старых мероприятий без них — из текста описания.
       const sched = readEventSchedule(ev);
-      const time = sched.timeStart
-        ? { start: sched.timeStart, end: sched.timeEnd || undefined, label: eventTimeLabel(sched) }
+      // Время — то, на которое записался сотрудник (V23, ADR-056).
+      const mine = sched.slots.find((s) => s.id === joinedSlot(id)) ?? sched.slots[0];
+      const time = mine?.timeStart
+        ? { start: mine.timeStart, end: mine.timeEnd || undefined, label: slotTimeLabel(mine) }
         : extractTimeRange(text);
       out.push({
         id: `event-${id}`,

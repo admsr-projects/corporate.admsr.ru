@@ -10,16 +10,22 @@ import { slideoverPopoverContent, slideoverSelectContent } from '../../composabl
 import { useCursorFeed } from '../../composables/useCursorFeed';
 import { useFeedSentinel } from '../../composables/useFeedSentinel';
 import { useAppToast } from '../../composables/useAppToast';
-import { useEventRsvp } from '../../composables/useEventRsvp';
+import { applyRsvpCounts, useEventRsvp } from '../../composables/useEventRsvp';
 import {
   eventDescriptionBody,
   eventDescriptionText,
   eventScheduleBody,
+  badSlotOrder,
+  emptySlotDraft,
   eventSeatsLabel,
   eventTimeLabel,
   isEventFull,
+  isSlotFull,
   readEventSchedule,
+  slotSeatsLabel,
+  slotTimeLabel,
   type EventSchedule,
+  type EventSlotDraft,
 } from '../../composables/eventSchedule';
 import EventScheduleFields from './components/EventScheduleFields.vue';
 import EventDescriptionEditor from './components/EventDescriptionEditor.vue';
@@ -43,6 +49,8 @@ type EventCardModel = EventPost & {
   /** Лимит мест заполнен (V22) */
   isFull: boolean;
   seatsLabel: string;
+  /** Время, на которое записан: «11:00–13:00» (если времён несколько) */
+  joinedSlotLabel: string;
 };
 
 const EVENTS_PAGE_LIMIT = 24;
@@ -75,7 +83,7 @@ watch(searchQuery, (q) => {
 const badgeFilter = ref<'_all' | 'Новое' | 'Архив'>('_all');
 const datePeriod = ref<'_all' | 'week' | 'month'>('_all');
 const eventsTab = ref<'all' | 'my'>('all');
-const { ensureLoaded: ensureRsvpLoaded, isJoined, setJoined } = useEventRsvp();
+const { ensureLoaded: ensureRsvpLoaded, isJoined, joinedSlot, setJoined } = useEventRsvp();
 
 const datePeriodOptions = [
   { value: '_all', label: 'Любая дата' },
@@ -151,7 +159,8 @@ function mapEvent(raw: any): EventPost {
   };
 }
 
-async function toggleJoin(event: EventPost, e?: Event) {
+/** Записаться (на время slotId; не передано — первое) или, если уже записан, отменить запись. */
+async function toggleJoin(event: EventPost, e?: Event, slotId?: number) {
   e?.preventDefault();
   e?.stopPropagation();
   const id = event.id;
@@ -159,7 +168,7 @@ async function toggleJoin(event: EventPost, e?: Event) {
   if (isArchivedBadge(event.badge)) return;
   const wasJoined = isJoined(id);
   if (!wasJoined && isEventFull(event.schedule)) return;
-  const res = await setJoined(id, !wasJoined);
+  const res = await setJoined(id, !wasJoined, slotId);
   if (!res.ok) {
     toast.add({
       title: 'Не удалось сохранить запись',
@@ -171,9 +180,7 @@ async function toggleJoin(event: EventPost, e?: Event) {
   }
   // Число записавшихся — с сервера: карточки показывают «Записалось N из M».
   const post = posts.value.find((p) => p.id === id);
-  if (post && res.participantsCount != null) {
-    post.schedule = { ...post.schedule, participantsCount: res.participantsCount };
-  }
+  if (post) post.schedule = applyRsvpCounts(post.schedule, res);
   toast.add({
     title: wasJoined ? 'Запись отменена' : 'Вы записались на мероприятие',
     color: 'success',
@@ -198,7 +205,27 @@ function toCardModel(event: EventPost): EventCardModel {
     isJoined: isJoined(event.id),
     isFull: isEventFull(event.schedule),
     seatsLabel: eventSeatsLabel(event.schedule),
+    joinedSlotLabel: joinedSlotLabelOf(event),
   };
+}
+
+function joinedSlotLabelOf(event: EventPost): string {
+  if (event.schedule.slots.length < 2) return '';
+  const slot = event.schedule.slots.find((s) => s.id === joinedSlot(event.id));
+  return slot ? slotTimeLabel(slot) : '';
+}
+
+/** Несколько времён — «Записаться» открывает выбор времени (ADR-056). */
+function slotMenuItems(event: EventCardModel) {
+  return [
+    event.schedule.slots.map((slot) => ({
+      label: slotTimeLabel(slot) || 'Время уточняется',
+      description: isSlotFull(slot) ? `мест нет · ${slotSeatsLabel(slot)}` : slotSeatsLabel(slot),
+      icon: isSlotFull(slot) ? 'i-lucide-lock' : 'i-lucide-clock',
+      disabled: isSlotFull(slot),
+      onSelect: () => void toggleJoin(event, undefined, slot.id),
+    })),
+  ];
 }
 
 const {
@@ -339,10 +366,8 @@ type CreateFormState = {
   badge: string | null;
   date: string;
   albumId: string;
-  timeStart: string;
-  timeEnd: string;
   location: string;
-  maxParticipants: number | null;
+  slots: EventSlotDraft[];
 };
 
 const createState = reactive<CreateFormState>({
@@ -351,10 +376,8 @@ const createState = reactive<CreateFormState>({
   badge: null,
   date: '',
   albumId: 'none',
-  timeStart: '',
-  timeEnd: '',
   location: '',
-  maxParticipants: null,
+  slots: [emptySlotDraft()],
 });
 
 const createImageFile = ref<File | null>(null);
@@ -383,10 +406,8 @@ function resetCreateForm() {
   createState.badge = null;
   createState.date = '';
   createState.albumId = 'none';
-  createState.timeStart = '';
-  createState.timeEnd = '';
   createState.location = '';
-  createState.maxParticipants = null;
+  createState.slots = [emptySlotDraft()];
   createImageFile.value = null;
   if (createImagePreview.value) URL.revokeObjectURL(createImagePreview.value);
   createImagePreview.value = '';
@@ -409,8 +430,9 @@ function validateCreate(): boolean {
     createError.value = 'Выберите дату проведения.';
     return false;
   }
-  if (createState.timeStart && createState.timeEnd && createState.timeEnd < createState.timeStart) {
-    createError.value = 'Время окончания раньше начала.';
+  const bad = badSlotOrder(createState.slots);
+  if (bad) {
+    createError.value = createState.slots.length > 1 ? `Время ${bad}: окончание раньше начала.` : 'Время окончания раньше начала.';
     return false;
   }
   createError.value = null;
@@ -626,7 +648,17 @@ onUnmounted(() => {
                     </p>
                   </RouterLink>
                   <div v-if="!isKiosk" class="mt-auto flex flex-wrap gap-2">
+                    <UDropdownMenu
+                      v-if="!event.isJoined && !event.isFull && !event.isArchived && event.schedule.slots.length > 1"
+                      :items="slotMenuItems(event)"
+                      :content="{ align: 'start' }"
+                    >
+                      <UButton color="primary" variant="outline" size="md" icon="i-lucide-calendar-plus" trailing-icon="i-lucide-chevron-down">
+                        Записаться
+                      </UButton>
+                    </UDropdownMenu>
                     <UButton
+                      v-else
                       color="primary"
                       variant="outline"
                       size="md"
@@ -634,7 +666,11 @@ onUnmounted(() => {
                       :disabled="event.isArchived || (event.isFull && !event.isJoined)"
                       @click="toggleJoin(event, $event)"
                     >
-                      {{ event.isJoined ? 'Вы записаны' : event.isFull ? 'Мест нет' : 'Записаться' }}
+                      {{
+                        event.isJoined
+                          ? event.joinedSlotLabel ? `Вы записаны · ${event.joinedSlotLabel}` : 'Вы записаны'
+                          : event.isFull ? 'Мест нет' : 'Записаться'
+                      }}
                     </UButton>
                     <UButton
                       color="neutral"
@@ -828,10 +864,8 @@ onUnmounted(() => {
           </UFormField>
 
           <EventScheduleFields
-            v-model:time-start="createState.timeStart"
-            v-model:time-end="createState.timeEnd"
+            v-model:slots="createState.slots"
             v-model:location="createState.location"
-            v-model:max-participants="createState.maxParticipants"
             size="xl"
           />
 

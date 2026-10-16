@@ -56,7 +56,7 @@ func notificationsFailDB(w http.ResponseWriter, op string, err error) {
 		return
 	}
 	if isUndefinedColumn(err) {
-		httpx.Fail(w, http.StatusServiceUnavailable, "Уведомления не обновлены на сервере: нужны миграции V18–V22 (V18__news_comments.sql, V19__calendar_colors_reminders.sql, V20__devblog.sql, V22__events_schedule_limit.sql)")
+		httpx.Fail(w, http.StatusServiceUnavailable, "Уведомления не обновлены на сервере: нужны миграции V18–V23 (V18__news_comments.sql, V19__calendar_colors_reminders.sql, V20__devblog.sql, V22__events_schedule_limit.sql, V23__event_slots.sql)")
 		return
 	}
 	httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
@@ -103,13 +103,17 @@ const sqlNotificationsList = `
 			COALESCE(u.avatar_url, ''),
 			COALESCE(p.content, nc.content, ce.title, ev.title, nw.title, ''),
 			n.calendar_entry_id, n.event_id, to_char(n.event_date, 'YYYY-MM-DD'),
-			COALESCE(ce.time_start, ev.time_start, ''), COALESCE(ce.location, ev.location, ''), COALESCE(ce.color, '')
+			COALESCE(ce.time_start, es.time_start, ''), COALESCE(ce.location, ev.location, ''), COALESCE(ce.color, ''),
+			COALESCE(ce.time_end, es.time_end, '')
 		FROM public.notifications n
 		LEFT JOIN public.user_info u ON u.id = n.actor_id
 		LEFT JOIN public.wall_posts p ON p.id = n.post_id
 		LEFT JOIN public.news_comments nc ON nc.id = n.comment_id
 		LEFT JOIN public.calendar_entries ce ON ce.id = n.calendar_entry_id
 		LEFT JOIN public.events ev ON ev.id = n.event_id
+		-- время мероприятия — то, на которое записан получатель (V23)
+		LEFT JOIN public.event_rsvps er ON er.event_id = n.event_id AND er.user_id = n.user_id
+		LEFT JOIN public.event_slots es ON es.id = er.slot_id
 		LEFT JOIN public.news nw ON nw.id = n.news_id
 		WHERE n.user_id = $1
 		ORDER BY n.created_at DESC, n.id DESC
@@ -196,11 +200,12 @@ func (h *Notifications) list(w http.ResponseWriter, r *http.Request, cur *auth.U
 			kind, name               string
 			avatar, content          string
 			timeStart, loc, color    string
+			timeEnd                  string
 			createdAt                time.Time
 			readAt                   *time.Time
 		)
 		if err := rows.Scan(&id, &kind, &postID, &commentID, &newsID, &createdAt, &readAt, &actorID, &name, &avatar, &content,
-			&entryID, &eventID, &eventDate, &timeStart, &loc, &color); err != nil {
+			&entryID, &eventID, &eventDate, &timeStart, &loc, &color, &timeEnd); err != nil {
 			notificationsFailDB(w, "scan", err)
 			return
 		}
@@ -224,6 +229,7 @@ func (h *Notifications) list(w http.ResponseWriter, r *http.Request, cur *auth.U
 				"title":           content,
 				"date":            eventDate,
 				"timeStart":       timeStart,
+				"timeEnd":         timeEnd,
 				"location":        loc,
 				"color":           color,
 				"calendarEntryId": entryID,

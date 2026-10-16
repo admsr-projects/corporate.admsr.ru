@@ -43,7 +43,7 @@ import NotFoundPage from '../pages/NotFoundPage.vue';
 import CourseMaterialPage from '../pages/Courses/employee/CourseMaterialPage.vue';
 import CourseTestPage from '../pages/Courses/employee/CourseTestPage.vue';
 import CourseResultPage from '../pages/Courses/employee/CourseResultPage.vue';
-import { userNeedsOnboarding } from '../composables/useOnboarding';
+import { checkOnboarding, expireSession } from '../composables/useOnboarding';
 
 const routes = [
   { path: '/t/:token', name: 'test-link', component: TestLinkPage, meta: { title: 'Прохождение', public: true } },
@@ -259,13 +259,23 @@ router.beforeEach(async (to, from, next) => {
         }
       }
       if (to.name === 'onboarding') return next();
-      const needsWelcome = await userNeedsOnboarding(user.id);
-      return next(needsWelcome ? { name: 'onboarding' } : { name: 'home' });
+      const check = await checkOnboarding(user.id);
+      // Сессия на сервере истекла — остаёмся на входе (с «Сессия истекла»), а не уходим на приветствие.
+      if (check === 'unauthorized') {
+        expireSession();
+        return next();
+      }
+      if (check === 'error') return next();
+      return next(check === 'incomplete' ? { name: 'onboarding' } : { name: 'home' });
     }
 
     if (user && to.name !== 'onboarding') {
-      const needsWelcome = await userNeedsOnboarding(user.id);
-      if (needsWelcome) return next({ name: 'onboarding' });
+      const check = await checkOnboarding(user.id);
+      if (check === 'unauthorized') {
+        expireSession();
+        return next({ name: 'login' });
+      }
+      if (check === 'incomplete') return next({ name: 'onboarding' });
     }
   }
 

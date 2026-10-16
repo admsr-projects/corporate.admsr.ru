@@ -2,59 +2,74 @@ package handlers
 
 import "testing"
 
-func TestParseEventScheduleNew(t *testing.T) {
-	got, msg := parseEventSchedule(map[string]any{
-		"time_start":       "9:05",
-		"time_end":         "15:30",
-		"location":         "  Районный центр культуры  ",
-		"max_participants": float64(30), // так приходит число из JSON
-	}, eventSchedule{})
-	if msg != "" {
-		t.Fatal(msg)
+func TestParseEventSlots(t *testing.T) {
+	slots, present, msg := parseEventSlots(map[string]any{"slots": []any{
+		map[string]any{"id": float64(7), "time_start": "9:05", "time_end": "11:00", "max_participants": float64(30)},
+		map[string]any{"time_start": "12:00", "time_end": "", "max_participants": nil},
+	}})
+	if msg != "" || !present || len(slots) != 2 {
+		t.Fatalf("%q %v %d", msg, present, len(slots))
 	}
-	if *got.TimeStart != "09:05" || *got.TimeEnd != "15:30" || *got.Location != "Районный центр культуры" || *got.MaxParticipants != 30 {
-		t.Fatalf("got %+v", got)
+	a, b := slots[0], slots[1]
+	if a.ID != 7 || *a.TimeStart != "09:05" || *a.TimeEnd != "11:00" || *a.MaxParticipants != 30 {
+		t.Fatalf("slot 1 %+v", a)
+	}
+	if b.ID != 0 || *b.TimeStart != "12:00" || b.TimeEnd != nil || b.MaxParticipants != nil {
+		t.Fatalf("slot 2 %+v", b)
 	}
 }
 
-func TestParseEventScheduleEmptyMeansUnset(t *testing.T) {
-	got, msg := parseEventSchedule(map[string]any{
-		"time_start": "", "time_end": nil, "location": " ", "max_participants": nil,
-	}, eventSchedule{})
-	if msg != "" || got.TimeStart != nil || got.TimeEnd != nil || got.Location != nil || got.MaxParticipants != nil {
-		t.Fatalf("got %+v, %q", got, msg)
+func TestParseEventSlotsAbsentAndEmpty(t *testing.T) {
+	if _, present, msg := parseEventSlots(map[string]any{}); present || msg != "" {
+		t.Fatal("без ключа slots времена не трогаем")
 	}
-	// 0 — тоже «без ограничения»
-	got, _ = parseEventSchedule(map[string]any{"max_participants": float64(0)}, eventSchedule{})
-	if got.MaxParticipants != nil {
+	// Пустой список — одно пустое время («время уточняется»).
+	slots, present, msg := parseEventSlots(map[string]any{"slots": []any{}})
+	if !present || msg != "" || len(slots) != 1 || slots[0].TimeStart != nil {
+		t.Fatalf("%+v %v %q", slots, present, msg)
+	}
+	// 0 — без ограничения
+	slots, _, _ = parseEventSlots(map[string]any{"slots": []any{map[string]any{"max_participants": float64(0)}}})
+	if slots[0].MaxParticipants != nil {
 		t.Fatal("0 должен значить «без ограничения»")
 	}
 }
 
-func TestParseEventScheduleKeepsMissingKeys(t *testing.T) {
-	start, loc := "10:00", "Зал"
-	limit := int32(5)
-	cur := eventSchedule{TimeStart: &start, Location: &loc, MaxParticipants: &limit}
-	got, msg := parseEventSchedule(map[string]any{"time_end": "11:00"}, cur)
-	if msg != "" || *got.TimeStart != "10:00" || *got.TimeEnd != "11:00" || *got.Location != "Зал" || *got.MaxParticipants != 5 {
-		t.Fatalf("got %+v, %q", got, msg)
+func TestParseEventSlotsRejects(t *testing.T) {
+	tooMany := make([]any, eventSlotsMax+1)
+	for i := range tooMany {
+		tooMany[i] = map[string]any{}
+	}
+	cases := map[string]any{
+		"не список":           "11:00",
+		"время не время":      []any{map[string]any{"time_start": "25:00"}},
+		"время текстом":       []any{map[string]any{"time_start": "в обед"}},
+		"конец без начала":    []any{map[string]any{"time_end": "12:00"}},
+		"конец раньше начала": []any{map[string]any{"time_start": "13:00", "time_end": "12:59"}},
+		"дробный лимит":       []any{map[string]any{"max_participants": float64(2.5)}},
+		"отрицательный лимит": []any{map[string]any{"max_participants": float64(-3)}},
+		"лимит текстом":       []any{map[string]any{"max_participants": "много"}},
+		"слишком много":       tooMany,
+	}
+	for name, v := range cases {
+		if _, _, msg := parseEventSlots(map[string]any{"slots": v}); msg == "" {
+			t.Errorf("%s: принято", name)
+		}
 	}
 }
 
-func TestParseEventScheduleRejects(t *testing.T) {
-	cases := map[string]map[string]any{
-		"время не время":        {"time_start": "25:00"},
-		"время текстом":         {"time_start": "в обед"},
-		"конец без начала":      {"time_end": "12:00"},
-		"конец раньше начала":   {"time_start": "13:00", "time_end": "12:59"},
-		"дробный лимит":         {"max_participants": float64(2.5)},
-		"отрицательный лимит":   {"max_participants": float64(-3)},
-		"лимит текстом":         {"max_participants": "много"},
-		"слишком длинное место": {"location": string(make([]rune, eventLocationMax+1))},
+func TestParseEventLocation(t *testing.T) {
+	cur := "Зал"
+	if got, _ := parseEventLocation(map[string]any{}, &cur); got != &cur {
+		t.Fatal("без ключа — текущее место")
 	}
-	for name, d := range cases {
-		if _, msg := parseEventSchedule(d, eventSchedule{}); msg == "" {
-			t.Errorf("%s: принято %v", name, d)
-		}
+	if got, _ := parseEventLocation(map[string]any{"location": "  РЦК  "}, nil); *got != "РЦК" {
+		t.Fatal(*got)
+	}
+	if got, _ := parseEventLocation(map[string]any{"location": nil}, &cur); got != nil {
+		t.Fatal("null — место не указано")
+	}
+	if _, msg := parseEventLocation(map[string]any{"location": string(make([]rune, eventLocationMax+1))}, nil); msg == "" {
+		t.Fatal("слишком длинное место принято")
 	}
 }

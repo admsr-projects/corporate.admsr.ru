@@ -1,4 +1,5 @@
 import { avatarUrlFromFilename, DEFAULT_PROFILE_AVATAR_FILENAME } from '../constants/profileAvatars';
+import { clearAuthStorage } from './useAuthSession';
 
 export type ProfileSnapshot = {
   id: number;
@@ -40,37 +41,70 @@ export function isOnboardingMarkedComplete(userId: number): boolean {
   return sessionStorage.getItem(onboardingSessionKey(userId)) === '1';
 }
 
-export async function fetchProfileSnapshot(userId: number): Promise<ProfileSnapshot | null> {
+/**
+ * Профиль для приветствия. `unauthorized` — сессия на сервере истекла (profile.php
+ * отвечает 401 без входа): это повод выйти на страницу входа, а не показывать
+ * приветствие. `error` — сеть или сервер недоступны.
+ */
+export type ProfileSnapshotResult =
+  | { status: 'ok'; profile: ProfileSnapshot }
+  | { status: 'unauthorized' }
+  | { status: 'error' };
+
+export async function loadProfileSnapshot(userId: number): Promise<ProfileSnapshotResult> {
   try {
     const res = await fetch(`/api/profile.php?id=${userId}`);
+    if (res.status === 401) return { status: 'unauthorized' };
     const data = await res.json();
-    if (!data.success || !data.data) return null;
+    if (!data.success || !data.data) return { status: 'error' };
     const p = data.data;
     return {
-      id: Number(p.id),
-      firstname: p.firstname ?? '',
-      surname: p.surname ?? '',
-      lastname: p.lastname ?? '',
-      ofo: p.ofo ?? '',
-      role: p.role ?? '',
-      avatar_url: p.avatar_url ?? '',
-      phone: p.phone ?? '',
-      email: p.email ?? '',
+      status: 'ok',
+      profile: {
+        id: Number(p.id),
+        firstname: p.firstname ?? '',
+        surname: p.surname ?? '',
+        lastname: p.lastname ?? '',
+        ofo: p.ofo ?? '',
+        role: p.role ?? '',
+        avatar_url: p.avatar_url ?? '',
+        phone: p.phone ?? '',
+        email: p.email ?? '',
+      },
     };
   } catch {
-    return null;
+    return { status: 'error' };
   }
 }
 
+/**
+ * `incomplete` — профиль не заполнен, нужно приветствие; `unauthorized` — сессия истекла,
+ * нужен вход; `complete` / `error` — пропускаем дальше. Раньше любая неудача (в том числе
+ * 401 после истечения сессии) считалась «профиль не заполнен», и вместо входа открывалось
+ * приветствие с выбором подразделения — похожее на регистрацию.
+ */
+export type OnboardingCheck = 'complete' | 'incomplete' | 'unauthorized' | 'error';
+
+export async function checkOnboarding(userId: number): Promise<OnboardingCheck> {
+  const res = await loadProfileSnapshot(userId);
+  if (res.status !== 'ok') return res.status;
+  if (isProfileIncomplete(res.profile)) return 'incomplete';
+  markOnboardingComplete(userId);
+  return 'complete';
+}
+
 export async function userNeedsOnboarding(userId: number): Promise<boolean> {
-  const profile = await fetchProfileSnapshot(userId);
-  if (!profile) return true;
-  const incomplete = isProfileIncomplete(profile);
-  if (!incomplete) {
-    markOnboardingComplete(userId);
-    return false;
+  return (await checkOnboarding(userId)) === 'incomplete';
+}
+
+/** Сессия истекла: чистый выход и отметка для страницы входа («Сессия истекла. Войдите снова.»). */
+export function expireSession(): void {
+  clearAuthStorage();
+  try {
+    sessionStorage.setItem('session-expired', '1');
+  } catch {
+    /* хранилище недоступно */
   }
-  return true;
 }
 
 export type SaveOnboardingPayload = {
