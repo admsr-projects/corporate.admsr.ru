@@ -225,6 +225,7 @@ function start() {
   lockedIds.value = new Set();
   revealing.value = false;
   resultsView.value = null;
+  submitError.value = null;
   timeUp.value = false;
   buildView();
   page.value = 1;
@@ -259,6 +260,8 @@ const reviewActive = ref(false); // прогон по неотвеченным
 const resultsView = ref<null | 'review' | 'poll' | 'score'>(null); // финальные экраны
 const pollResults = ref<Record<string, { count: number; percent: number }>>({});
 let lastDuration = 0;
+const submitting = ref(false);
+const submitError = ref<string | null>(null);
 
 // Соответствие / классификация: карточки перетаскиваются между зонами.
 // zones: 'pool' — ещё не разложенные; у classify остальные ключи — id категорий (в них утверждения),
@@ -428,14 +431,16 @@ const passed = computed(() => {
 });
 
 async function finalize() {
+  if (submitting.value) return;
   stopTimer();
   finishOpen.value = false;
   unansweredOpen.value = false;
+  submitError.value = null;
   lastDuration = startTs.value ? Math.floor((Date.now() - startTs.value) / 1000) : 0;
-  if (props.persistSession && props.form.id != null) store.clearSession(props.form.id);
 
   let recorded = false;
   serverResult.value = null;
+  submitting.value = true;
   try {
     if (props.submit) {
       const raw = await props.submit({ ...answers }, lastDuration) as any;
@@ -452,7 +457,19 @@ async function finalize() {
       await store.submitAttempt(props.form.id, { ...answers }, lastDuration);
       recorded = true;
     }
-  } catch { recorded = false; /* напр. лимит попыток */ }
+  } catch (e) {
+    if (props.submit) {
+      // Ответы не дошли до сервера: результата нет, «0» показывать нельзя. Остаёмся на вопросе —
+      // ответы и сессия сохранены, можно повторить. На сервере попытка остаётся «в процессе».
+      submitError.value = (e as Error)?.message || 'Не удалось отправить ответы';
+      startInterval();
+      return;
+    }
+    recorded = false; /* напр. лимит попыток */
+  } finally {
+    submitting.value = false;
+  }
+  if (props.persistSession && props.form.id != null) store.clearSession(props.form.id);
 
   // Живые результаты голосования
   if (isPoll.value && props.form.liveResults && recorded) {
@@ -878,6 +895,17 @@ function pollPercent(id: string): number { return pollResults.value[id]?.percent
           </div>
         </div>
 
+        <!-- Ошибка отправки -->
+        <div v-if="submitError && !resultsView" class="shrink-0 px-5 pt-2">
+          <UAlert
+            color="error"
+            variant="subtle"
+            icon="i-lucide-circle-alert"
+            title="Ответы не отправлены"
+            :description="`${submitError}. Ваши ответы сохранены — нажмите «${finishLabel}», чтобы повторить.`"
+          />
+        </div>
+
         <!-- Тайм-аут -->
         <div v-if="page > 0 && timeUp && !resultsView" class="shrink-0 px-5 pt-2 text-center text-xs text-error font-medium">
           Время вышло — ответ на текущий вопрос можно дать, затем форма закроется
@@ -910,8 +938,8 @@ function pollPercent(id: string): number { return pollResults.value[id]?.percent
           <!-- Полоса + счётчик + основная кнопка -->
           <div class="border-t border-default px-5 py-3 flex items-center justify-between gap-3">
             <span class="text-xs text-dimmed tabular-nums">{{ page }} / {{ view.length }}</span>
-            <UButton v-if="timeUp" color="primary" size="md" :icon="finishIcon" @click="finalize">Завершить</UButton>
-            <UButton v-else-if="isLastPage || reviewActive" color="primary" size="md" :icon="finishIcon" :disabled="revealing" @click="onFinishClick">{{ finishLabel }}</UButton>
+            <UButton v-if="timeUp" color="primary" size="md" :icon="finishIcon" :loading="submitting" @click="finalize">Завершить</UButton>
+            <UButton v-else-if="isLastPage || reviewActive" color="primary" size="md" :icon="finishIcon" :loading="submitting" :disabled="revealing" @click="onFinishClick">{{ finishLabel }}</UButton>
             <UButton v-else-if="currentLocked" color="primary" size="md" trailing-icon="i-lucide-arrow-right" :disabled="revealing" @click="advance">Дальше</UButton>
             <UButton v-else color="primary" size="md" icon="i-lucide-check" :disabled="!currentQuestion || !isAnswered(currentQuestion) || revealing" @click="onAnswer">Ответить</UButton>
           </div>
@@ -927,7 +955,7 @@ function pollPercent(id: string): number { return pollResults.value[id]?.percent
       <template #footer>
         <div class="flex justify-end gap-3 w-full">
           <UButton color="neutral" variant="outline" @click="finishOpen = false">Отмена</UButton>
-          <UButton color="primary" :icon="finishIcon" @click="finalize">{{ finishLabel }}</UButton>
+          <UButton color="primary" :icon="finishIcon" :loading="submitting" @click="finalize">{{ finishLabel }}</UButton>
         </div>
       </template>
     </UModal>
