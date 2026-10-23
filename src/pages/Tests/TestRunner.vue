@@ -35,6 +35,8 @@ const emit = defineEmits<{
     } | null;
   }): void;
   (e: 'retake'): void;
+  /** Нажали «Пройти тест» — началось прохождение (страница теста курса заводит новую попытку, если прошлая завершена). */
+  (e: 'start'): void;
 }>();
 
 const store = useTestsStore();
@@ -232,6 +234,7 @@ function start() {
   startTs.value = Date.now();
   startInterval();
   saveSessionNow();
+  emit('start');
 }
 /** Фиксируем только данный ответ: пропущенный через «Далее» вопрос должен остаться открытым. */
 function lockCurrentIfNeeded() {

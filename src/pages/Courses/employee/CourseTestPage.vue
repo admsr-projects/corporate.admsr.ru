@@ -29,6 +29,14 @@ const ready = ref(false);
 const savedAnswers = ref<Record<string, unknown>>({});
 const runnerKey = ref(0);
 const retaking = ref(false);
+/**
+ * Попытка уже завершена на сервере. После «Закрыть» на экране результата раннер
+ * возвращается к «Пройти тест», а ответы раньше уходили в эту же завершённую попытку:
+ * сервер отвечал 409 «Попытка уже завершена», а до ADR-057 сотрудник видел «0 из 0»
+ * и пересдать не мог. Теперь новое прохождение заводит новую попытку (ADR-058).
+ */
+const attemptDone = ref(false);
+let renewing: Promise<void> | null = null;
 const courseTitle = ref('Обучение');
 
 watch(
@@ -57,6 +65,7 @@ async function beginAttempt(opts?: { clearAnswers?: boolean }) {
   })) as any;
 
   attemptId.value = Number(started?.attemptId ?? started?.attempt?.id);
+  attemptDone.value = false;
   const src = started?.form;
   if (src) {
     Object.assign(form, createEmptyForm(), src, {
@@ -119,7 +128,37 @@ async function loadAttempt() {
   }
 }
 
+/** Новая попытка вместо завершённой — без перезагрузки формы, ответы остаются в раннере. */
+async function renewAttempt() {
+  const started = (await store.attemptStart({
+    enrollmentId: enrollmentId.value,
+    courseTestLinkId: courseTestLinkId.value,
+  })) as any;
+  attemptId.value = Number(started?.attemptId ?? started?.attempt?.id);
+  attemptDone.value = false;
+}
+
+function onRunnerStart() {
+  if (!attemptDone.value || renewing) return;
+  renewing = renewAttempt()
+    .catch((e: any) => {
+      toast.add({
+        title: 'Не удалось начать новую попытку',
+        description: e?.message || 'Возможно, исчерпан лимит попыток.',
+        color: 'error',
+        icon: 'i-lucide-alert-circle',
+      });
+    })
+    .finally(() => {
+      renewing = null;
+    });
+}
+
 async function onSubmit(answers: Record<string, unknown>, durationSec: number) {
+  if (renewing) await renewing;
+  // Не успели завести новую попытку при старте (или не вышло) — заводим сейчас; ошибка
+  // (например, лимит попыток) покажется в раннере, ответы останутся.
+  if (attemptDone.value) await renewAttempt();
   if (!attemptId.value) throw new Error('Нет попытки');
   await store.attemptSave({
     attemptId: attemptId.value,
@@ -127,13 +166,15 @@ async function onSubmit(answers: Record<string, unknown>, durationSec: number) {
     enrollmentId: enrollmentId.value,
     courseTestLinkId: courseTestLinkId.value,
   });
-  return await store.attemptFinish({
+  const result = await store.attemptFinish({
     attemptId: attemptId.value,
     answers,
     durationSec,
     enrollmentId: enrollmentId.value,
     courseTestLinkId: courseTestLinkId.value,
   });
+  attemptDone.value = true;
+  return result;
 }
 
 function onFinish(payload?: {
@@ -226,6 +267,7 @@ async function onRetake() {
       class="flex-1 min-h-0"
       @finish="onFinish"
       @retake="onRetake"
+      @start="onRunnerStart"
     />
   </UMain>
 </template>
