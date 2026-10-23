@@ -383,7 +383,7 @@ onUnmounted(() => {
                 {{ viewsLabel(post.views) }}
               </span>
             </div>
-            <div class="flex min-w-0 flex-col gap-1 px-0.5">
+            <div class="flex min-w-0 flex-col gap-1 px-2.5 pb-2.5">
               <p v-if="post.date" class="text-sm text-muted">
                 {{ post.date }}
               </p>

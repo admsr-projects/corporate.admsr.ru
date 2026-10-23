@@ -724,7 +724,7 @@ onUnmounted(() => {
                     {{ event.badge }}
                   </UBadge>
                 </div>
-                <div class="flex min-w-0 flex-col gap-1 px-0.5">
+                <div class="flex min-w-0 flex-col gap-1 px-2.5 pb-2.5">
                   <p v-if="event.date" class="text-sm text-muted">{{ event.date }}</p>
                   <h3 class="text-base font-semibold text-highlighted line-clamp-2 text-pretty">
                     {{ event.title }}
@@ -769,7 +769,7 @@ onUnmounted(() => {
                       <span class="text-[10px] font-medium uppercase tracking-wide">{{ event.monthShort }}</span>
                     </span>
                   </div>
-                  <div class="flex min-w-0 flex-col gap-1 px-0.5">
+                  <div class="flex min-w-0 flex-col gap-1 px-2.5 pb-2.5">
                     <p v-if="event.date" class="text-sm text-muted">{{ event.date }}</p>
                     <h3 class="text-base font-semibold text-highlighted line-clamp-2 text-pretty">
                       {{ event.title }}
@@ -779,7 +779,7 @@ onUnmounted(() => {
                     </p>
                   </div>
                 </RouterLink>
-                <div v-if="!isKiosk && !event.isPast" class="px-0.5 pb-0.5">
+                <div v-if="!isKiosk && !event.isPast" class="px-2.5 pb-2.5">
                   <UButton
                     color="neutral"
                     variant="soft"
