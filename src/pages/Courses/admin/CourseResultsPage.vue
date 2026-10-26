@@ -7,6 +7,7 @@ import { useCoursesStore } from '../../../composables/useCoursesStore';
 import { useAppToast } from '../../../composables/useAppToast';
 import { useOfoTree } from '../../../composables/useOfoTree';
 import { fmtDuration } from '../../../composables/useTestStats';
+import OfoSelect from '../../../components/OfoSelect.vue';
 import CourseStatusBadge from '../components/CourseStatusBadge.vue';
 import { useAdminCoursePortalBreadcrumbs } from '../useAdminCoursePortalBreadcrumbs';
 import { describeDeadline, formatDateTime, formatLastActivity } from '../courseDeadline';
@@ -17,8 +18,8 @@ const { toast } = useAppToast();
 useAdminCoursePortalBreadcrumbs();
 const {
   ensureLoaded: ensureOfo,
-  unitItems,
   unitById,
+  rootLabelOf,
 } = useOfoTree();
 
 const courseId = computed(() => Number(route.params.courseId));
@@ -65,12 +66,6 @@ const statusItems = [
   { label: 'Просрочен', value: 'overdue' },
   { label: 'Отменён', value: 'cancelled' },
 ];
-
-/** Любое подразделение (путь «Корень / Отдел»); сервер сам берёт и вложенные (Q-11). */
-const ofoItems = computed(() => [
-  { label: 'Все ОФО', value: '_all' },
-  ...unitItems.value.map((u) => ({ label: u.label, value: String(u.id) })),
-]);
 
 /** Порядок строк: сервер отдаёт по дате назначения, остальное сортируем здесь. */
 type SortKey = 'assigned' | 'fio' | 'progress' | 'deadline' | 'activity';
@@ -322,7 +317,7 @@ async function exportResults() {
         r.fio,
         r.login || '',
         r.role || '',
-        r.ofoName || '',
+        rootLabelOf(r.ofoId) || r.ofoName || '',
         statusLabel(r.status),
         r.progressPercent ?? 0,
         r.topicsTotal ? `${r.topicsCompleted ?? 0} из ${r.topicsTotal}` : '',
@@ -598,17 +593,12 @@ async function confirmReset() {
           size="lg"
           :ui="{ base: 'w-full' }"
         />
-        <USelectMenu
-          v-model="ofoFilter"
-          :items="ofoItems"
-          value-key="value"
-          label-key="label"
+        <OfoSelect
+          :model-value="ofoFilter === '_all' ? null : Number(ofoFilter)"
           placeholder="Все ОФО"
+          reset-label="Все ОФО"
           size="lg"
-          color="neutral"
-          :search-input="{ placeholder: 'Найти ОФО…' }"
-          class="w-full"
-          :content="{ align: 'start', sideOffset: 8 }"
+          @update:model-value="ofoFilter = $event == null ? '_all' : String($event)"
         />
         <USelectMenu
           v-model="statusFilter"

@@ -2,7 +2,17 @@
 import { computed, reactive, ref, watch } from 'vue';
 import { useOfoTree, type OfoUnit } from '../composables/useOfoTree';
 
-const props = defineProps<{ modelValue: number | null; disabled?: boolean }>();
+const props = withDefaults(
+  defineProps<{
+    modelValue: number | null;
+    disabled?: boolean;
+    placeholder?: string;
+    size?: 'md' | 'lg' | 'xl';
+    /** Пункт «сбросить» вверху списка (для фильтров): выбирает null. */
+    resetLabel?: string;
+  }>(),
+  { placeholder: 'Выберите подразделение', size: 'xl' },
+);
 const emit = defineEmits<{ (e: 'update:modelValue', v: number | null): void }>();
 
 const { categories, units, loading, error, ensureLoaded, rootUnitsOf, childrenOf, hasChildren, unitById, pathLabel } = useOfoTree();
@@ -53,7 +63,7 @@ function toggle(id: number) {
   if (expanded.has(id)) expanded.delete(id);
   else expanded.add(id);
 }
-function select(id: number) {
+function select(id: number | null) {
   emit('update:modelValue', id);
   open.value = false;
   query.value = '';
@@ -76,13 +86,13 @@ watch(open, (v) => { if (v) expandPathTo(props.modelValue); });
     <UButton
       color="neutral"
       variant="outline"
-      size="xl"
+      :size="size"
       :disabled="disabled"
       trailing-icon="i-lucide-chevron-down"
       class="w-full justify-between"
     >
       <span class="truncate" :class="modelValue == null ? 'text-dimmed' : ''">
-        {{ selectedLabel || 'Выберите подразделение' }}
+        {{ selectedLabel || placeholder }}
       </span>
     </UButton>
 
@@ -103,6 +113,15 @@ watch(open, (v) => { if (v) expandPathTo(props.modelValue); });
           />
 
           <div class="flex flex-col gap-1 max-h-72 overflow-y-auto scrollbar-hide px-0.5 py-0.5">
+            <button
+              v-if="resetLabel && !isSearching"
+              type="button"
+              class="w-full text-left rounded-lg px-2 py-1.5 text-sm transition-colors"
+              :class="modelValue == null ? SEL : HOVER"
+              @click="select(null)"
+            >
+              {{ resetLabel }}
+            </button>
             <!-- Поиск -->
             <template v-if="isSearching">
               <p v-if="!matches.length" class="text-sm text-muted px-2 py-2">Ничего не найдено</p>
