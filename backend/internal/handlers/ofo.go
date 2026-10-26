@@ -113,11 +113,154 @@ func (h *OFO) Seats(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"success": true, "data": data})
 }
 
+// Tree — GET: дерево ОФО; POST: добавить подразделение (админ).
 func (h *OFO) Tree(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		h.treeList(w, r)
+	case http.MethodPost:
+		h.unitAdd(w, r)
+	default:
 		httpx.MethodNotAllowed(w)
+	}
+}
+
+const maxUnitNameLen = 300
+
+// unitAdd добавляет подразделение. Тело: { name, category_id, parent_id? }.
+// Без parent_id — корневое подразделение категории; иначе категория берётся у родителя.
+func (h *OFO) unitAdd(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r, h.Auth); !ok {
 		return
 	}
+	var body struct {
+		Name       string `json:"name"`
+		CategoryID int64  `json:"category_id"`
+		ParentID   *int64 `json:"parent_id"`
+	}
+	if err := httpx.DecodeJSON(r, &body); err != nil {
+		httpx.Fail(w, http.StatusBadRequest, "Некорректный JSON")
+		return
+	}
+	name := strings.Join(strings.Fields(body.Name), " ")
+	if name == "" {
+		httpx.Fail(w, http.StatusBadRequest, "Введите название подразделения")
+		return
+	}
+	if utf8.RuneCountInString(name) > maxUnitNameLen {
+		httpx.Fail(w, http.StatusBadRequest, "Название подразделения слишком длинное")
+		return
+	}
+
+	ctx := r.Context()
+	tx, err := h.Pool.Begin(ctx)
+	if err != nil {
+		httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Как и у должностей: сериализуем, чтобы параллельные запросы не взяли один id.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ofo_unit'))`); err != nil {
+		httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+		return
+	}
+
+	categoryID := body.CategoryID
+	var level int64
+	var familyNumber *int64
+	if body.ParentID != nil {
+		var parentLevel int64
+		err := tx.QueryRow(ctx, `
+			SELECT category_id, level, family_number FROM public.ofo_unit WHERE id = $1`, *body.ParentID,
+		).Scan(&categoryID, &parentLevel, &familyNumber)
+		if errors.Is(err, pgx.ErrNoRows) {
+			httpx.Fail(w, http.StatusNotFound, "Родительское подразделение не найдено")
+			return
+		}
+		if err != nil {
+			httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+			return
+		}
+		level = parentLevel + 1
+	} else {
+		var catExists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM public.ofo_category WHERE id = $1)`, categoryID,
+		).Scan(&catExists); err != nil {
+			httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+			return
+		}
+		if !catExists {
+			httpx.Fail(w, http.StatusNotFound, "Категория не найдена")
+			return
+		}
+		// Уровень корня — как у существующих корней категории.
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(MIN(level), 0) FROM public.ofo_unit
+			WHERE category_id = $1 AND parent_id IS NULL`, categoryID).Scan(&level); err != nil {
+			httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+			return
+		}
+	}
+
+	var dup bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM public.ofo_unit
+			WHERE category_id = $1 AND parent_id IS NOT DISTINCT FROM $2::bigint AND lower(btrim(name)) = lower($3)
+		)`, categoryID, body.ParentID, name).Scan(&dup); err != nil {
+		httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+		return
+	}
+	if dup {
+		httpx.Fail(w, http.StatusConflict, "Подразделение с таким названием уже есть на этом уровне")
+		return
+	}
+
+	var seq *string
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_get_serial_sequence('public.ofo_unit', 'id')`).Scan(&seq); err != nil {
+		httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
+		return
+	}
+	const nextUnitNumber = `(SELECT COALESCE(MAX(unit_number), 0) + 1 FROM public.ofo_unit)`
+	const nextSort = `(SELECT COALESCE(MAX(sort_order), 0) + 1 FROM public.ofo_unit WHERE category_id = $1 AND parent_id IS NOT DISTINCT FROM $2::bigint)`
+	var id, unitNumber, sortOrder int64
+	if seq != nil {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO public.ofo_unit (name, category_id, parent_id, level, unit_number, family_number, sort_order)
+			VALUES ($3, $1, $2, $4, `+nextUnitNumber+`, $5, `+nextSort+`)
+			RETURNING id, unit_number, sort_order`,
+			categoryID, body.ParentID, name, level, familyNumber).Scan(&id, &unitNumber, &sortOrder)
+	} else {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO public.ofo_unit (id, name, category_id, parent_id, level, unit_number, family_number, sort_order)
+			VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM public.ofo_unit), $3, $1, $2, $4, `+nextUnitNumber+`, $5, `+nextSort+`)
+			RETURNING id, unit_number, sort_order`,
+			categoryID, body.ParentID, name, level, familyNumber).Scan(&id, &unitNumber, &sortOrder)
+	}
+	if err != nil {
+		httpx.Fail(w, http.StatusInternalServerError, "Не удалось добавить подразделение")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		httpx.Fail(w, http.StatusInternalServerError, "Не удалось добавить подразделение")
+		return
+	}
+	httpx.Created(w, map[string]any{
+		"id":            id,
+		"name":          name,
+		"category_id":   categoryID,
+		"parent_id":     body.ParentID,
+		"level":         level,
+		"unit_number":   unitNumber,
+		"family_number": familyNumber,
+		"sort_order":    sortOrder,
+	}, "Подразделение добавлено")
+}
+
+func (h *OFO) treeList(w http.ResponseWriter, r *http.Request) {
 	// Оргструктура — внутренние данные портала, анонимам не отдаём (SEC-001).
 	if _, ok := requireUser(w, r, h.Auth); !ok {
 		return

@@ -418,6 +418,7 @@ DDL этой таблицы **нет** в `db/migration/` — схема уна�
 
 | API | Поведение |
 |-----|-----------|
+| `POST /api/ofo_tree.php` `{name, category_id, parent_id?}` | **Только админ.** Добавляет подразделение (корень категории или вложенное); 409 при дубле названия на том же уровне |
 | `GET /api/ofo_tree.php` | Категории + юниты; `position_count`, `user_count` (считает `user_info.ofo`, совпадающий с `ofo_unit.id` по числовому regex) |
 | `GET /api/ofo_positions.php?unit_number=N` | Должности юнита; флаг руководителя `is_head` |
 | `POST /api/ofo_positions.php` `{unit_number, name}` | **Только админ.** Добавляет должность подразделению. Если должность с таким названием (без учёта регистра) уже есть в `ofo_position` — привязывает её, не создаёт дубль. Новая получает `is_head=false`. 409, если уже привязана к этому подразделению |
@@ -450,7 +451,7 @@ user_info.role    ◄── ofo_position.name   (в БД хранится стр
 |-----------|-----------|----------|
 | `OfoSelect.vue` | Один юнит, поиск по дереву | `ofo_tree.php` |
 | `OfoMultiSelect.vue` | Несколько юнитов + каскад потомков | `ofo_tree.php` |
-| `AdminOfoPanel.vue` | Обзор дерева + счётчики сотрудников (read-only) | `ofo_tree.php` |
+| `AdminOfoPanel.vue` | Обзор дерева + счётчики сотрудников; админ добавляет подразделения и должности | `ofo_tree.php` |
 | Фильтр пользователей в админке | Сравнение `user.ofo` со строкой фильтра | часто через `useOfoData` / `ofo.php` |
 | Конструктор тестов | `restrictByOfo` + multi-select → `test_audience_ofo` | дерево |
 | Гостевая ссылка теста | Опциональный выбор ОФО → `guest_ofo_id` | дерево |

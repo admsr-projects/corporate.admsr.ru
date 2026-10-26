@@ -22,6 +22,7 @@ const {
   pathLabel,
   fetchPositions,
   addPosition,
+  addUnit,
 } = useOfoTree();
 ensureLoaded();
 
@@ -190,6 +191,51 @@ async function submitAddPosition() {
   }
 }
 
+// ── Добавление подразделения ──────────────────────────────────────────────────
+const unitAddOpen = ref(false);
+const unitName = ref('');
+const unitCategoryId = ref<number | null>(null);
+/** Родитель нового подразделения; null — корневое в выбранной категории. */
+const unitParent = ref<OfoUnit | null>(null);
+const unitSaving = ref(false);
+const unitError = ref('');
+
+const categoryItems = computed(() => sortedCategories.value.map((c) => ({ label: c.name, value: c.id })));
+
+function openAddUnit(parent: OfoUnit | null) {
+  unitParent.value = parent;
+  unitCategoryId.value = parent?.category_id ?? sortedCategories.value[0]?.id ?? null;
+  unitName.value = '';
+  unitError.value = '';
+  unitAddOpen.value = true;
+}
+
+async function submitAddUnit() {
+  const name = unitName.value.trim();
+  if (unitSaving.value) return;
+  if (!name) {
+    unitError.value = 'Введите название подразделения';
+    return;
+  }
+  if (unitCategoryId.value == null) {
+    unitError.value = 'Выберите категорию';
+    return;
+  }
+  unitSaving.value = true;
+  unitError.value = '';
+  try {
+    const created = await addUnit(name, unitCategoryId.value, unitParent.value?.id ?? null);
+    unitAddOpen.value = false;
+    success('Подразделение добавлено', `«${created.name}»`);
+    if (created.parent_id != null) expanded.add(created.parent_id);
+    await reload();
+  } catch (e) {
+    unitError.value = e instanceof Error ? e.message : 'Не удалось добавить подразделение';
+  } finally {
+    unitSaving.value = false;
+  }
+}
+
 // Переход во вложенное подразделение внутри той же панели.
 watch(selectedId, (id, prev) => {
   if (id == null || prev == null || id === prev) return;
@@ -213,6 +259,7 @@ watch(selectedId, (id, prev) => {
       <div class="flex items-center gap-2">
         <UButton color="neutral" variant="outline" icon="i-lucide-unfold-vertical" @click="expandAll">Развернуть</UButton>
         <UButton color="neutral" variant="outline" icon="i-lucide-fold-vertical" @click="collapseAll">Свернуть</UButton>
+        <UButton color="primary" icon="i-lucide-plus" :disabled="!categories.length" @click="openAddUnit(null)">Добавить ОФО</UButton>
       </div>
     </div>
 
@@ -398,9 +445,15 @@ watch(selectedId, (id, prev) => {
             </ul>
           </section>
 
-          <section v-if="selectedChildren.length" class="flex flex-col gap-3" aria-labelledby="ofo-children-title">
-            <h3 id="ofo-children-title" class="text-base font-semibold text-highlighted">Вложенные подразделения</h3>
-            <ul class="flex flex-col gap-1">
+          <section class="flex flex-col gap-3" aria-labelledby="ofo-children-title">
+            <div class="flex items-center justify-between gap-3">
+              <h3 id="ofo-children-title" class="text-base font-semibold text-highlighted">Вложенные подразделения</h3>
+              <UButton color="neutral" variant="outline" size="sm" icon="i-lucide-plus" @click="openAddUnit(selected)">
+                Добавить
+              </UButton>
+            </div>
+            <p v-if="!selectedChildren.length" class="text-sm text-muted">Вложенных подразделений нет.</p>
+            <ul v-else class="flex flex-col gap-1">
               <li v-for="ch in selectedChildren" :key="ch.id">
                 <button
                   type="button"
@@ -445,6 +498,38 @@ watch(selectedId, (id, prev) => {
         </div>
       </template>
     </USlideover>
+
+    <UModal
+      v-model:open="unitAddOpen"
+      title="Новое подразделение"
+      :description="unitParent ? `Будет вложено в «${unitParent.name}».` : 'Будет добавлено на верхний уровень выбранной категории.'"
+    >
+      <template #body>
+        <UForm :state="{ name: unitName }" class="flex flex-col gap-4" @submit.prevent="submitAddUnit">
+          <UFormField v-if="!unitParent" label="Категория" name="category">
+            <USelect v-model="unitCategoryId" :items="categoryItems" size="xl" color="neutral" class="w-full" />
+          </UFormField>
+          <UFormField label="Название" name="name" :error="unitError || undefined">
+            <UInput
+              v-model="unitName"
+              size="xl"
+              color="neutral"
+              placeholder="Например, Отдел информатизации"
+              maxlength="300"
+              autofocus
+              class="w-full"
+              @update:model-value="unitError = ''"
+            />
+          </UFormField>
+        </UForm>
+      </template>
+      <template #footer>
+        <div class="flex justify-end gap-3 w-full">
+          <UButton color="neutral" variant="outline" size="xl" @click="unitAddOpen = false">Отмена</UButton>
+          <UButton color="primary" size="xl" :loading="unitSaving" @click="submitAddUnit">Добавить</UButton>
+        </div>
+      </template>
+    </UModal>
 
     <UModal
       v-model:open="addOpen"

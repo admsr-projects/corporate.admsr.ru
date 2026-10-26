@@ -169,14 +169,12 @@ const userMenuItems = computed(() => {
         class: 'cursor-default',
         onSelect: keepMenuOpen,
       },
-      {
-        label: 'Дэшборд администратора',
-        icon: 'i-lucide-layout-dashboard',
-        to: '/admin',
-      },
       // Только в роли администратора — как и сама страница (requiresAdmin), ADR-052.
       ...(currentRole.value === 'admin'
-        ? [{ label: 'Редактировать девблог', icon: 'i-lucide-notebook-pen', to: '/admin/devblog' }]
+        ? [
+            { label: 'Дэшборд администратора', icon: 'i-lucide-layout-dashboard', to: '/admin' },
+            { label: 'Редактировать девблог', icon: 'i-lucide-notebook-pen', to: '/admin/devblog' },
+          ]
         : []),
     ]);
   }

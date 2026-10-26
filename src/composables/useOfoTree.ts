@@ -163,7 +163,20 @@ export function useOfoTree() {
     return json.data as OfoPosition;
   }
 
+  /** Добавить подразделение (только админ). Без parentId — корневое в категории. */
+  async function addUnit(name: string, categoryId: number, parentId: number | null): Promise<OfoUnit> {
+    const res = await fetch('/api/ofo_tree.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, category_id: categoryId, parent_id: parentId }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.success) throw new Error(json?.message || `Ошибка ${res.status}`);
+    return json.data as OfoUnit;
+  }
+
   return {
+    addUnit,
     categories,
     units,
     loading,

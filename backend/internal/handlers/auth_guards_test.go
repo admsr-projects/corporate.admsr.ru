@@ -97,6 +97,7 @@ func TestEndpointsRequireSessionBeforeTouchingDB(t *testing.T) {
 		{"ofo list", http.MethodGet, "/api/ofo.php", "", nil, ofoH.List},
 		{"ofo seats", http.MethodGet, "/api/ofo_seats.php", "", nil, ofoH.Seats},
 		{"ofo tree", http.MethodGet, "/api/ofo_tree.php", "", nil, ofoH.Tree},
+		{"ofo unit add", http.MethodPost, "/api/ofo_tree.php", `{"name":"x","category_id":1}`, nil, ofoH.Tree},
 		{"ofo positions", http.MethodGet, "/api/ofo_positions.php", "", nil, ofoH.Positions},
 		{"ofo positions add", http.MethodPost, "/api/ofo_positions.php", `{"unit_number":1,"name":"x"}`, nil, ofoH.Positions},
 
