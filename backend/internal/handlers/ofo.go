@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -208,7 +209,7 @@ func (h *OFO) unitAdd(w http.ResponseWriter, r *http.Request) {
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM public.ofo_unit
-			WHERE category_id = $1 AND parent_id IS NOT DISTINCT FROM $2::bigint AND lower(btrim(name)) = lower($3)
+			WHERE category_id = $1 AND parent_id IS NOT DISTINCT FROM $2::integer AND lower(btrim(name)) = lower($3)
 		)`, categoryID, body.ParentID, name).Scan(&dup); err != nil {
 		httpx.Fail(w, http.StatusInternalServerError, "Ошибка подключения к БД")
 		return
@@ -225,7 +226,7 @@ func (h *OFO) unitAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const nextUnitNumber = `(SELECT COALESCE(MAX(unit_number), 0) + 1 FROM public.ofo_unit)`
-	const nextSort = `(SELECT COALESCE(MAX(sort_order), 0) + 1 FROM public.ofo_unit WHERE category_id = $1 AND parent_id IS NOT DISTINCT FROM $2::bigint)`
+	const nextSort = `(SELECT COALESCE(MAX(sort_order), 0) + 1 FROM public.ofo_unit WHERE category_id = $1 AND parent_id IS NOT DISTINCT FROM $2::integer)`
 	var id, unitNumber, sortOrder int64
 	if seq != nil {
 		err = tx.QueryRow(ctx, `
@@ -241,10 +242,12 @@ func (h *OFO) unitAdd(w http.ResponseWriter, r *http.Request) {
 			categoryID, body.ParentID, name, level, familyNumber).Scan(&id, &unitNumber, &sortOrder)
 	}
 	if err != nil {
+		log.Printf("ofo unit add: insert: %v", err)
 		httpx.Fail(w, http.StatusInternalServerError, "Не удалось добавить подразделение")
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
+		log.Printf("ofo unit add: commit: %v", err)
 		httpx.Fail(w, http.StatusInternalServerError, "Не удалось добавить подразделение")
 		return
 	}
